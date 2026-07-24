@@ -401,14 +401,20 @@ def main():
                     min_dist = float('inf')
 
                     if results[0].boxes is not None and len(results[0].boxes) > 0:
+                        now_log_time = time.time()
                         for box in results[0].boxes:
                             conf_val = float(box.conf[0])
                             
-                            # Cumplir requerimiento: confianza >= 70%
+                            # Cumplir requerimiento: solo procesar y mostrar detecciones >= 70% de confianza
                             if conf_val >= CONFIDENCE_THRESHOLD:
                                 xyxy = box.xyxy[0].tolist()
                                 x1, y1, x2, y2 = map(int, xyxy)
                                 px, py = (x1 + x2) // 2, (y1 + y2) // 2
+                                
+                                # Loguear en Docker solo si la confianza es >= 70% (limitado a 1 log/seg para legibilidad)
+                                if not hasattr(main, "_last_det_log") or (now_log_time - main._last_det_log >= 1.0):
+                                    main._last_det_log = now_log_time
+                                    print(f"[DETECCIÓN ≥70%] Persona detectada — Confianza: {round(conf_val * 100, 1)}% | BBox: [{x1}, {y1}, {x2}, {y2}]")
                                 
                                 detecciones_payload.append({
                                     "clase": "persona",
