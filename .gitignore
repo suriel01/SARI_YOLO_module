@@ -1,4 +1,8 @@
 venv/
+.venv/
 __pycache__/
-yolo26n.*
-
+model_cache/
+*.engine
+*.pt
+logs.txt
+logs2.txt

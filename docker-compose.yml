@@ -1,0 +1,29 @@
+services:
+  modulo_ojo:
+    build: .
+    container_name: modulo_ojo
+    restart: unless-stopped
+    runtime: nvidia # Habilita el runtime de NVIDIA para acceso a la GPU
+    environment:
+      - CEREBRO_HOST=${CEREBRO_HOST:-192.168.1.79} # IP del servidor donde ejecuta SARI Brain Agent
+      - CEREBRO_PORT_WS=8765
+      - CEREBRO_PORT_HTTP=8000
+      - CEREBRO_URL=ws://${CEREBRO_HOST:-192.168.1.79}:8765
+      - CEREBRO_HTTP_EVENT_URL=http://${CEREBRO_HOST:-192.168.1.79}:8000/api/alerts/event
+      - CONFIDENCE_THRESHOLD=0.70
+      - CAMERA_IP=192.168.1.200
+      - CAMERA_USER=admin
+      - CAMERA_PASS=Asenso117925
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-tu_token_aqui}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-tu_chat_id_aqui}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    volumes:
+      - ./model_cache:/app/model_cache # Para cachear yolo26n.engine y no recompilar
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
