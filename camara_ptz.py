@@ -81,7 +81,7 @@ latest_encoded_frame = None
 # =====================================================================
 # AUXILIAR: FRAME DE ESPERA AUTOMÁTICO (ANTI-PANTALLA NEGRA)
 # =====================================================================
-def crear_frame_espera(mensaje="CONECTANDO A CÁMARA HIKVISION..."):
+def crear_frame_espera(mensaje="CONECTANDO A CAMARA HIKVISION..."):
     """Genera una imagen JPEG sintética cuando la cámara aún no ha entregado frames."""
     img = np.zeros((720, 1280, 3), dtype=np.uint8)
     
@@ -94,7 +94,7 @@ def crear_frame_espera(mensaje="CONECTANDO A CÁMARA HIKVISION..."):
     cv2.line(img, (560, 360), (720, 360), (56, 189, 248), 2)
     
     # Texto descriptivo
-    cv2.putText(img, "SARI MÓDULO OJOS (JETSON ORIN)", (380, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (56, 189, 248), 2)
+    cv2.putText(img, "SARI MODULO OJOS (JETSON ORIN)", (380, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (56, 189, 248), 2)
     cv2.putText(img, mensaje, (320, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
     cv2.putText(img, time.strftime("IP Camera RTSP/TCP | %Y-%m-%d %H:%M:%S"), (420, 500), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (148, 163, 184), 1)
     
