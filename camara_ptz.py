@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Módulo Ojo - Microservicio de Producción Dockerizado (SARI Eye Node).
-Captura de video RTSP de alta velocidad, detección YOLO acelerada (TensorRT/CUDA FP16),
+Captura de video RTSP de alta velocidad (RTSP/TCP), detección YOLO acelerada (TensorRT/CUDA FP16),
 seguimiento PTZ Hikvision ultra-fluido (25Hz) y Servidor de Video en Vivo MJPEG (Puerto 8080).
 
 Comunica telemetría y alertas al Módulo Cerebro (SARI Brain Agent) mediante:
   1. WebSockets: ws://<CEREBRO_HOST>:8765
   2. REST API: http://<CEREBRO_HOST>:8000/api/alerts/event
-  3. Servidor de Video Web MJPEG: http://0.0.0.0:8080/video_feed
+  3. Servidor de Video Web MJPEG: http://0.0.0.0:8080/video_feed (o /mjpeg)
 """
 
 import os
@@ -17,9 +17,13 @@ import json
 import asyncio
 import queue
 import cv2
+import numpy as np
 import requests
 import websockets
 from requests.auth import HTTPDigestAuth
+
+# Forzar transporte TCP en FFMPEG/OpenCV para evitar artefactos, desincronización y pantallas negras en Hikvision
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 # Importar módulo de alertas de Telegram (fallback / directo)
 from telegram_alert import enviar_alerta_telegram
@@ -75,18 +79,44 @@ latest_encoded_frame = None
 
 
 # =====================================================================
+# AUXILIAR: FRAME DE ESPERA AUTOMÁTICO (ANTI-PANTALLA NEGRA)
+# =====================================================================
+def crear_frame_espera(mensaje="CONECTANDO A CÁMARA HIKVISION..."):
+    """Genera una imagen JPEG sintética cuando la cámara aún no ha entregado frames."""
+    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    
+    # Fondo con degradado sutil
+    cv2.rectangle(img, (0, 0), (1280, 720), (15, 23, 42), -1)
+    
+    # Retícula e icono
+    cv2.circle(img, (640, 360), 60, (56, 189, 248), 2)
+    cv2.line(img, (640, 280), (640, 440), (56, 189, 248), 2)
+    cv2.line(img, (560, 360), (720, 360), (56, 189, 248), 2)
+    
+    # Texto descriptivo
+    cv2.putText(img, "SARI MÓDULO OJOS (JETSON ORIN)", (380, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (56, 189, 248), 2)
+    cv2.putText(img, mensaje, (320, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    cv2.putText(img, time.strftime("IP Camera RTSP/TCP | %Y-%m-%d %H:%M:%S"), (420, 500), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (148, 163, 184), 1)
+    
+    ret, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    return buffer.tobytes() if ret else b''
+
+
+# =====================================================================
 # SERVIDOR HTTP DE TRANSMISIÓN DE VIDEO MJPEG EN VIVO (PUERTO 8080)
 # =====================================================================
 def _generar_frames_mjpeg():
-    """Generador de frames JPEG codificados para el stream MJPEG del navegador."""
+    """Generador continuo de frames JPEG codificados para el stream web de la interfaz SOC."""
     while True:
         with frame_lock:
             jpeg_bytes = latest_encoded_frame
 
-        if jpeg_bytes is not None:
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-        time.sleep(0.033)  # ~30 FPS
+        if jpeg_bytes is None:
+            jpeg_bytes = crear_frame_espera("INICIALIZANDO STREAM EN VIVO...")
+
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
+        time.sleep(0.04)  # ~25 FPS estables
 
 
 def iniciar_servidor_stream_video():
@@ -103,9 +133,10 @@ def iniciar_servidor_stream_video():
         @app.route('/snapshot')
         def snapshot():
             with frame_lock:
-                if latest_encoded_frame is not None:
-                    return Response(latest_encoded_frame, mimetype='image/jpeg')
-            return Response("Frame no disponible", status=503)
+                data = latest_encoded_frame
+            if data is None:
+                data = crear_frame_espera("SNAPSHOT INICIALIZANDO...")
+            return Response(data, mimetype='image/jpeg')
 
         @app.route('/')
         def index():
@@ -123,14 +154,14 @@ def iniciar_servidor_stream_video():
             </head>
             <body>
                 <h2>👁️ SARI Módulo Ojos — Transmisión Web MJPEG</h2>
-                <p><span class="badge">EN VIVO</span> Cámara Hikvision PTZ con Superposición YOLO26n</p>
-                <img src="/video_feed" alt="Cámara PTZ en vivo" />
+                <p><span class="badge">EN VIVO</span> Cámara Hikvision PTZ con Superposición YOLO26n (RTSP/TCP)</p>
+                <img src="/mjpeg" alt="Cámara PTZ en vivo" />
             </body>
             </html>
             """
             return Response(html_content, mimetype='text/html')
 
-        print(f"[STREAM VIDEO] Servidor Flask en vivo escuchando en http://0.0.0.0:{STREAM_PORT}/video_feed")
+        print(f"[STREAM VIDEO] Servidor Flask en vivo escuchando en http://0.0.0.0:{STREAM_PORT}/mjpeg")
         threading.Thread(
             target=lambda: app.run(host='0.0.0.0', port=STREAM_PORT, debug=False, use_reloader=False),
             daemon=True,
@@ -161,23 +192,22 @@ def iniciar_servidor_stream_video():
                 elif self.path == '/snapshot':
                     with frame_lock:
                         data = latest_encoded_frame
-                    if data:
-                        self.send_response(200)
-                        self.send_header('Content-Type', 'image/jpeg')
-                        self.end_headers()
-                        self.wfile.write(data)
-                    else:
-                        self.send_error(503)
+                    if not data:
+                        data = crear_frame_espera("SNAPSHOT INICIALIZANDO...")
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'image/jpeg')
+                    self.end_headers()
+                    self.wfile.write(data)
                 else:
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/html')
                     self.end_headers()
-                    html = f"<html><body style='background:#0f172a;color:#fff;text-align:center;'><h2>👁️ SARI Módulo Ojos</h2><img src='/video_feed' style='max-width:900px;'/></body></html>"
+                    html = f"<html><body style='background:#0f172a;color:#fff;text-align:center;'><h2>👁️ SARI Módulo Ojos</h2><img src='/mjpeg' style='max-width:900px;'/></body></html>"
                     self.wfile.write(html.encode('utf-8'))
 
         def _run_native():
             server = ThreadedHTTPServer(('0.0.0.0', STREAM_PORT), MJPEGHandler)
-            print(f"[STREAM VIDEO] Servidor HTTP Nativo escuchando en http://0.0.0.0:{STREAM_PORT}/video_feed")
+            print(f"[STREAM VIDEO] Servidor HTTP Nativo escuchando en http://0.0.0.0:{STREAM_PORT}/mjpeg")
             server.serve_forever()
 
         threading.Thread(target=_run_native, daemon=True, name="MJPEGStreamThread").start()
@@ -209,7 +239,7 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85):
 
 
 # =====================================================================
-# CLASE: CAPTURA DE VIDEO MULTIHILO ALTA VELOCIDAD (ANTI-LAG)
+# CLASE: CAPTURA DE VIDEO MULTIHILO ALTA VELOCIDAD (ANTI-LAG & RTSP/TCP)
 # =====================================================================
 class ThreadedVideoCapture:
     def __init__(self, rtsp_url):
@@ -225,10 +255,10 @@ class ThreadedVideoCapture:
     def _initialize_capture(self):
         if self.cap is not None:
             self.cap.release()
-        print(f"[VIDEO] Conectando a {self.rtsp_url}...")
-        self.cap = cv2.VideoCapture(self.rtsp_url)
+        print(f"[VIDEO] Conectando a stream Hikvision RTSP/TCP: {self.rtsp_url}...")
+        self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer mínimo anti-lag
         
     def start(self):
         if self.running:
@@ -243,16 +273,16 @@ class ThreadedVideoCapture:
         max_failures = 30
         while self.running:
             if self.cap is None or not self.cap.isOpened():
-                print("[VIDEO] Conexión perdida. Reintentando...")
+                print("[VIDEO] Conexión RTSP perdida. Reintentando...")
                 self._initialize_capture()
                 time.sleep(2)
                 continue
 
             ret, frame = self.cap.read()
-            if not ret:
+            if not ret or frame is None:
                 consecutive_failures += 1
                 if consecutive_failures >= max_failures:
-                    print("[WARNING] Reiniciando stream RTSP...")
+                    print("[WARNING] Reiniciando stream RTSP/TCP por falta de datos...")
                     self._initialize_capture()
                     consecutive_failures = 0
                 time.sleep(0.005)
@@ -470,6 +500,10 @@ def main():
     print("  Visión por Computadora Acelerada + Control PTZ + Stream MJPEG (8080)")
     print("=" * 60 + "\n")
     
+    # Inicializar frame de espera inmediatamente para evitar pantallas negras al conectar
+    with frame_lock:
+        latest_encoded_frame = crear_frame_espera("CONECTANDO A CÁMARA HIKVISION...")
+
     # 1. Iniciar Hilo de WebSockets
     ws_thread = threading.Thread(target=iniciar_hilo_websocket, daemon=True, name="WebSocketThread")
     ws_thread.start()
@@ -480,7 +514,7 @@ def main():
     # 3. Cargar Modelo YOLO
     model = cargar_modelo_yolo()
     
-    # 4. Inicializar PTZ y Captura de Video
+    # 4. Inicializar PTZ y Captura de Video (RTSP/TCP)
     ptz = HikvisionPTZ(ip=CAMERA_IP, username=USERNAME, password=PASSWORD)
     capture = ThreadedVideoCapture(rtsp_url=RTSP_URL)
     capture.start()
@@ -508,7 +542,7 @@ def main():
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
             
-            # Frame anotado para el stream web
+            # Frame anotado para la transmisión web MJPEG
             annotated_frame = frame.copy()
             cv2.drawMarker(annotated_frame, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 20, 2)
             
@@ -537,7 +571,6 @@ def main():
                                 x1, y1, x2, y2 = map(int, xyxy)
                                 px, py = (x1 + x2) // 2, (y1 + y2) // 2
                                 
-                                # Dibujar Bounding Box en el frame de transmisión web
                                 is_alert = (tiempo_inicio_deteccion is not None and (time.time() - tiempo_inicio_deteccion) >= 5.0)
                                 box_color = (0, 0, 255) if is_alert else (0, 255, 0)
                                 label_text = f"Persona {int(conf_val*100)}%"
@@ -630,14 +663,14 @@ def main():
                 except Exception as e:
                     print(f"[YOLO ERROR] {e}")
 
-            # Codificar frame anotado para la transmisión HTTP MJPEG
+            # Codificar siempre el frame procesado/anotado para el servidor MJPEG
             try:
                 ok, jpeg_buf = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if ok:
                     with frame_lock:
                         latest_encoded_frame = jpeg_buf.tobytes()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ENCODE ERROR] {e}")
 
             # Enviar telemetría periódica a la cola de WebSockets
             payload = {
