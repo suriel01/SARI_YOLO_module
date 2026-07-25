@@ -96,6 +96,7 @@ def iniciar_servidor_stream_video():
 
         @app.route('/video_feed')
         @app.route('/stream')
+        @app.route('/mjpeg')
         def video_feed():
             return Response(_generar_frames_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
@@ -147,7 +148,7 @@ def iniciar_servidor_stream_video():
                 pass
 
             def do_GET(self):
-                if self.path in ['/video_feed', '/stream']:
+                if self.path in ['/video_feed', '/stream', '/mjpeg']:
                     self.send_response(200)
                     self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
                     self.end_headers()
