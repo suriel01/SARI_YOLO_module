@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Módulo Ojo - Microservicio de Producción Dockerizado (SARI Eye Node).
-Captura de video RTSP de alta velocidad, detección YOLO acelerada (TensorRT/CUDA FP16)
-y seguimiento PTZ Hikvision ultra-fluido (25Hz).
+Captura de video RTSP de alta velocidad, detección YOLO acelerada (TensorRT/CUDA FP16),
+seguimiento PTZ Hikvision ultra-fluido (25Hz) y Servidor de Video en Vivo MJPEG (Puerto 8080).
 
 Comunica telemetría y alertas al Módulo Cerebro (SARI Brain Agent) mediante:
   1. WebSockets: ws://<CEREBRO_HOST>:8765
   2. REST API: http://<CEREBRO_HOST>:8000/api/alerts/event
+  3. Servidor de Video Web MJPEG: http://0.0.0.0:8080/video_feed
 """
 
 import os
@@ -35,6 +36,12 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
+try:
+    from flask import Flask, Response
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
@@ -50,6 +57,7 @@ CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_
 CEREBRO_HTTP_EVENT_URL = os.environ.get("CEREBRO_HTTP_EVENT_URL", f"http://{CEREBRO_HOST}:{CEREBRO_PORT_HTTP}/api/alerts/event")
 
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.70"))
+STREAM_PORT = int(os.environ.get("STREAM_PORT", "8080"))
 RTSP_URL = f"rtsp://{USERNAME}:{PASSWORD}@{CAMERA_IP}:554/Streaming/Channels/101"
 
 # Estado Compartido
@@ -59,8 +67,119 @@ estado_global = {
     "tilt_actual": 0
 }
 
-# Cola de mensajes no bloqueante para WebSockets
 telemetria_queue = queue.Queue(maxsize=10)
+
+# Buffer para transmisión de video MJPEG
+frame_lock = threading.Lock()
+latest_encoded_frame = None
+
+
+# =====================================================================
+# SERVIDOR HTTP DE TRANSMISIÓN DE VIDEO MJPEG EN VIVO (PUERTO 8080)
+# =====================================================================
+def _generar_frames_mjpeg():
+    """Generador de frames JPEG codificados para el stream MJPEG del navegador."""
+    while True:
+        with frame_lock:
+            jpeg_bytes = latest_encoded_frame
+
+        if jpeg_bytes is not None:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
+        time.sleep(0.033)  # ~30 FPS
+
+
+def iniciar_servidor_stream_video():
+    """Inicia el servidor HTTP de transmisión de video en segundo plano (Flask o Native HTTP)."""
+    if FLASK_AVAILABLE:
+        app = Flask(__name__)
+
+        @app.route('/video_feed')
+        @app.route('/stream')
+        def video_feed():
+            return Response(_generar_frames_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+        @app.route('/snapshot')
+        def snapshot():
+            with frame_lock:
+                if latest_encoded_frame is not None:
+                    return Response(latest_encoded_frame, mimetype='image/jpeg')
+            return Response("Frame no disponible", status=503)
+
+        @app.route('/')
+        def index():
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>SARI Módulo Ojos — Video en Vivo</title>
+                <style>
+                    body {{ background: #0f172a; color: #f8fafc; font-family: monospace; text-align: center; margin: 0; padding: 20px; }}
+                    h2 {{ color: #38bdf8; }}
+                    img {{ border: 2px solid #38bdf8; border-radius: 8px; max-width: 960px; width: 100%; height: auto; box-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }}
+                    .badge {{ background: #22c55e; color: #000; padding: 4px 8px; border-radius: 4px; font-weight: bold; }}
+                </style>
+            </head>
+            <body>
+                <h2>👁️ SARI Módulo Ojos — Transmisión Web MJPEG</h2>
+                <p><span class="badge">EN VIVO</span> Cámara Hikvision PTZ con Superposición YOLO26n</p>
+                <img src="/video_feed" alt="Cámara PTZ en vivo" />
+            </body>
+            </html>
+            """
+            return Response(html_content, mimetype='text/html')
+
+        print(f"[STREAM VIDEO] Servidor Flask en vivo escuchando en http://0.0.0.0:{STREAM_PORT}/video_feed")
+        threading.Thread(
+            target=lambda: app.run(host='0.0.0.0', port=STREAM_PORT, debug=False, use_reloader=False),
+            daemon=True,
+            name="MJPEGStreamThread"
+        ).start()
+    else:
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from socketserver import ThreadingMixIn
+
+        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+            daemon_threads = True
+
+        class MJPEGHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                if self.path in ['/video_feed', '/stream']:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
+                    self.end_headers()
+                    try:
+                        for chunk in _generar_frames_mjpeg():
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                    except Exception:
+                        pass
+                elif self.path == '/snapshot':
+                    with frame_lock:
+                        data = latest_encoded_frame
+                    if data:
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.end_headers()
+                        self.wfile.write(data)
+                    else:
+                        self.send_error(503)
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.end_headers()
+                    html = f"<html><body style='background:#0f172a;color:#fff;text-align:center;'><h2>👁️ SARI Módulo Ojos</h2><img src='/video_feed' style='max-width:900px;'/></body></html>"
+                    self.wfile.write(html.encode('utf-8'))
+
+        def _run_native():
+            server = ThreadedHTTPServer(('0.0.0.0', STREAM_PORT), MJPEGHandler)
+            print(f"[STREAM VIDEO] Servidor HTTP Nativo escuchando en http://0.0.0.0:{STREAM_PORT}/video_feed")
+            server.serve_forever()
+
+        threading.Thread(target=_run_native, daemon=True, name="MJPEGStreamThread").start()
 
 
 # =====================================================================
@@ -108,7 +227,7 @@ class ThreadedVideoCapture:
         print(f"[VIDEO] Conectando a {self.rtsp_url}...")
         self.cap = cv2.VideoCapture(self.rtsp_url)
         self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer mínimo para evitar latencia acumulada
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
     def start(self):
         if self.running:
@@ -174,7 +293,6 @@ class HikvisionPTZ:
             force = True
 
         now = time.time()
-        # Cooldown reducido a 40ms (25 Hz) para máxima fluidez sin saturar el bus
         if not force:
             if (now - self.last_send_time < 0.04) and (pan == self.last_pan and tilt == self.last_tilt):
                 return True
@@ -183,7 +301,6 @@ class HikvisionPTZ:
         self.last_tilt = tilt
         self.last_send_time = now
         
-        # Actualizar estado global para telemetría
         estado_global["pan_actual"] = pan
         estado_global["tilt_actual"] = tilt
 
@@ -342,28 +459,33 @@ def iniciar_hilo_websocket():
 
 
 # =====================================================================
-# BUCLE PRINCIPAL DE PROCESAMIENTO (OPENCV + YOLO + TRACKING SUAVE)
+# BUCLE PRINCIPAL DE PROCESAMIENTO (OPENCV + YOLO + TRACKING SUAVE + MJPEG)
 # =====================================================================
 def main():
+    global latest_encoded_frame
+
     print("\n" + "=" * 60)
     print("  SARI — MÓDULO OJOS (Eye Node v2.0)")
-    print("  Visión por Computadora Acelerada + Control PTZ Ultra-Fluido")
+    print("  Visión por Computadora Acelerada + Control PTZ + Stream MJPEG (8080)")
     print("=" * 60 + "\n")
     
-    # 1. Iniciar hilo de WebSockets
+    # 1. Iniciar Hilo de WebSockets
     ws_thread = threading.Thread(target=iniciar_hilo_websocket, daemon=True, name="WebSocketThread")
     ws_thread.start()
 
-    # 2. Cargar modelo YOLO
+    # 2. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
+    iniciar_servidor_stream_video()
+
+    # 3. Cargar Modelo YOLO
     model = cargar_modelo_yolo()
     
-    # 3. Inicializar PTZ y Captura de Video
+    # 4. Inicializar PTZ y Captura de Video
     ptz = HikvisionPTZ(ip=CAMERA_IP, username=USERNAME, password=PASSWORD)
     capture = ThreadedVideoCapture(rtsp_url=RTSP_URL)
     capture.start()
 
     last_ptz_send_time = 0.0
-    ptz_command_cooldown = 0.04  # 25 Hz para suavidad máxima
+    ptz_command_cooldown = 0.04
     was_moving = False
     
     tiempo_inicio_deteccion = None
@@ -377,7 +499,6 @@ def main():
 
     try:
         while True:
-            t_frame_start = time.time()
             ret, frame = capture.read()
             if not ret or frame is None:
                 time.sleep(0.005)
@@ -385,6 +506,10 @@ def main():
 
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
+            
+            # Frame anotado para el stream web
+            annotated_frame = frame.copy()
+            cv2.drawMarker(annotated_frame, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 20, 2)
             
             detecciones_payload = []
             
@@ -405,13 +530,26 @@ def main():
                         for box in results[0].boxes:
                             conf_val = float(box.conf[0])
                             
-                            # Cumplir requerimiento: solo procesar y mostrar detecciones >= 70% de confianza
+                            # Solo procesar y mostrar detecciones >= 70% de confianza
                             if conf_val >= CONFIDENCE_THRESHOLD:
                                 xyxy = box.xyxy[0].tolist()
                                 x1, y1, x2, y2 = map(int, xyxy)
                                 px, py = (x1 + x2) // 2, (y1 + y2) // 2
                                 
-                                # Loguear en Docker solo si la confianza es >= 70% (limitado a 1 log/seg para legibilidad)
+                                # Dibujar Bounding Box en el frame de transmisión web
+                                is_alert = (tiempo_inicio_deteccion is not None and (time.time() - tiempo_inicio_deteccion) >= 5.0)
+                                box_color = (0, 0, 255) if is_alert else (0, 255, 0)
+                                label_text = f"Persona {int(conf_val*100)}%"
+                                
+                                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 2)
+                                cv2.putText(annotated_frame, label_text, (x1, max(20, y1 - 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
+                                
+                                if is_alert:
+                                    cv2.putText(annotated_frame, "!!! INTRUSION DETECTADA !!!", (20, 40),
+                                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 3)
+
+                                # Loguear en consola (máximo 1 vez por segundo)
                                 if not hasattr(main, "_last_det_log") or (now_log_time - main._last_det_log >= 1.0):
                                     main._last_det_log = now_log_time
                                     print(f"[DETECCIÓN ≥70%] Persona detectada — Confianza: {round(conf_val * 100, 1)}% | BBox: [{x1}, {y1}, {x2}, {y2}]")
@@ -433,13 +571,12 @@ def main():
                         offset_x, offset_y = px - cx, cy - py
                         norm_x, norm_y = offset_x / cx, offset_y / cy
                         
-                        deadzone = 0.08  # Deadzone reducida para respuesta rápida a movimientos sutiles
+                        deadzone = 0.08
                         pan_speed, tilt_speed = 0, 0
                         
                         if abs(norm_x) > deadzone:
                             sign_x = 1 if norm_x > 0 else -1
                             norm_dist_x = (abs(norm_x) - deadzone) / (1.0 - deadzone)
-                            # Respuesta proporcional con aceleración suave
                             pan_speed = int(sign_x * (20 + (norm_dist_x ** 1.1) * 80))
                             
                         if abs(norm_y) > deadzone:
@@ -479,7 +616,6 @@ def main():
                                 try:
                                     telemetria_queue.put_nowait(payload_alerta)
                                     print(f"[ALERTA PTZ] Persona detectada durante {dur_round}s. Enviando telemetría y evento REST al Cerebro...")
-                                    # Enviar evento directamente a SARI Brain Agent vía REST API
                                     notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2])
                                     ultimo_envio_alerta = time.time()
                                 except queue.Full:
@@ -492,6 +628,15 @@ def main():
 
                 except Exception as e:
                     print(f"[YOLO ERROR] {e}")
+
+            # Codificar frame anotado para la transmisión HTTP MJPEG
+            try:
+                ok, jpeg_buf = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if ok:
+                    with frame_lock:
+                        latest_encoded_frame = jpeg_buf.tobytes()
+            except Exception:
+                pass
 
             # Enviar telemetría periódica a la cola de WebSockets
             payload = {
@@ -509,7 +654,7 @@ def main():
             except queue.Full:
                 pass
 
-            # MÉTRICAS DE FLUIDEZ (REPORTAR FPS Y LATENCIA EN CONSOLA CADA 5 SEGUNDOS)
+            # MÉTRICAS DE FLUIDEZ (REPORTAR FPS Y LATENCIA CADA 5 SEGUNDOS)
             fps_frame_count += 1
             elapsed_fps = time.time() - fps_start_time
             if elapsed_fps >= 5.0:

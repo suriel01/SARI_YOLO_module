@@ -17,17 +17,19 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Instalar dependencias de Python
-# Nota: La imagen l4t-pytorch ya incluye torch y torchvision.
-# Instalamos opencv-python-headless ya que no necesitamos GUI
 RUN pip3 install --no-cache-dir \
     ultralytics \
     opencv-python-headless \
     websockets \
-    requests
+    requests \
+    flask
 
 # Copiar el código fuente
 COPY camara_ptz.py .
 COPY telegram_alert.py .
+
+# Puerto expuesto para servidor de video MJPEG
+EXPOSE 8080
 
 # Comando por defecto
 CMD ["python3", "camara_ptz.py"]

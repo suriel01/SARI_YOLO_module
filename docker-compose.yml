@@ -4,6 +4,8 @@ services:
     container_name: modulo_ojo
     restart: unless-stopped
     runtime: nvidia # Habilita el runtime de NVIDIA para acceso a la GPU
+    ports:
+      - "8080:8080" # Servidor de video en vivo MJPEG para el navegador y SARI Brain Agent
     environment:
       - CEREBRO_HOST=${CEREBRO_HOST:-192.168.1.79} # IP del servidor donde ejecuta SARI Brain Agent
       - CEREBRO_PORT_WS=8765
@@ -11,6 +13,7 @@ services:
       - CEREBRO_URL=ws://${CEREBRO_HOST:-192.168.1.79}:8765
       - CEREBRO_HTTP_EVENT_URL=http://${CEREBRO_HOST:-192.168.1.79}:8000/api/alerts/event
       - CONFIDENCE_THRESHOLD=0.70
+      - STREAM_PORT=8080
       - CAMERA_IP=192.168.1.200
       - CAMERA_USER=admin
       - CAMERA_PASS=Asenso117925
