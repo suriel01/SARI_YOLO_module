@@ -16,6 +16,7 @@ import threading
 import json
 import asyncio
 import queue
+import base64
 import cv2
 import numpy as np
 import requests
@@ -223,20 +224,47 @@ def iniciar_servidor_stream_video():
 # =====================================================================
 # AUXILIAR: NOTIFICACIÓN REST AL SARI BRAIN AGENT
 # =====================================================================
-def notificar_evento_rest(camera_id, reason, duration, confidence=0.85):
-    """Envía un evento de intrusión estructurado al backend del Módulo Cerebro."""
+def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=None):
+    """Envía un evento de intrusión estructurado con captura de evidencia en base64 al backend del Módulo Cerebro."""
+    image_base64 = None
+    if frame is not None:
+        try:
+            h, w = frame.shape[:2]
+            snap_img = cv2.resize(frame, (1280, 720)) if w > 1280 else frame
+            ok, buf = cv2.imencode('.jpg', snap_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ok:
+                image_base64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+        except Exception as e:
+            print(f"[SNAPSHOT ERROR] No se pudo codificar imagen para alerta: {e}")
+
+    snapshot_data_url = f"data:image/jpeg;base64,{image_base64}" if image_base64 else None
+
     payload = {
         "module_name": f"Jetson-{camera_id}",
+        "camara_id": camera_id,
+        "event_type": "intrusion",
+        "severity": "high",
         "event": f"Intrusión ({reason}) - {round(duration, 1)}s",
+        "message": f"Intrusión detectada ({reason}) durante {round(duration, 1)}s con {int(confidence*100)}% de confianza",
         "confidence": confidence,
-        "auto_siren": True
+        "duration": duration,
+        "auto_siren": True,
+        "image_base64": image_base64,
+        "snapshot": snapshot_data_url,
+        "image_url": snapshot_data_url,
+        "metadata": {
+            "confidence": confidence,
+            "duration": duration,
+            "image_base64": image_base64,
+            "snapshot": snapshot_data_url
+        }
     }
     
     def _post():
         try:
             resp = requests.post(CEREBRO_HTTP_EVENT_URL, json=payload, timeout=3.0)
-            if resp.status_code == 200:
-                print(f"[REST ALERT] Evidencia de intrusión enviada exitosamente a SARI Brain Agent ({CEREBRO_HTTP_EVENT_URL}).")
+            if resp.status_code in [200, 201, 202]:
+                print(f"[REST ALERT OK] Evidencia con captura enviada exitosamente a SARI Brain ({CEREBRO_HTTP_EVENT_URL}). Status: {resp.status_code}")
             else:
                 print(f"[REST ALERT WARNING] SARI Brain respondió con HTTP {resp.status_code}")
         except Exception as e:
@@ -668,7 +696,7 @@ def main():
                                 try:
                                     telemetria_queue.put_nowait(payload_alerta)
                                     print(f"[ALERTA PTZ] Persona detectada durante {dur_round}s. Enviando telemetría y evento REST al Cerebro...")
-                                    notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2])
+                                    notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2], frame=annotated_frame)
                                     ultimo_envio_alerta = time.time()
                                     tiempo_inicio_deteccion = None
                                     ultimo_visto = None
