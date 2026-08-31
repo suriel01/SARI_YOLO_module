@@ -670,6 +670,8 @@ def main():
                                     print(f"[ALERTA PTZ] Persona detectada durante {dur_round}s. Enviando telemetría y evento REST al Cerebro...")
                                     notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2])
                                     ultimo_envio_alerta = time.time()
+                                    tiempo_inicio_deteccion = None
+                                    ultimo_visto = None
                                 except queue.Full:
                                     pass
                     else:
