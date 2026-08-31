@@ -540,6 +540,7 @@ def main():
     was_moving = False
     
     tiempo_inicio_deteccion = None
+    ultimo_visto = None
     ultimo_envio_alerta = 0.0
     cooldown_alerta = 10.0
 
@@ -650,6 +651,7 @@ def main():
                                 
                     # CONTROL DE ALERTAS DE INTRUSIÓN PROLONGADA (> 5 SEGUNDOS)
                     if best_coords is not None:
+                        ultimo_visto = time.time()
                         if tiempo_inicio_deteccion is None:
                             tiempo_inicio_deteccion = time.time()
                         else:
@@ -671,7 +673,11 @@ def main():
                                 except queue.Full:
                                     pass
                     else:
-                        tiempo_inicio_deteccion = None
+                        # Ventana de paciencia de 2 segundos antes de resetear el timer
+                        if ultimo_visto is not None and (time.time() - ultimo_visto > 2.0):
+                            tiempo_inicio_deteccion = None
+                            ultimo_visto = None
+                            
                         if was_moving:
                             ptz.detener()
                             was_moving = False
