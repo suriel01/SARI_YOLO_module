@@ -246,7 +246,7 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85):
 
 
 # =====================================================================
-# CLASE: CAPTURA DE VIDEO MULTIHILO ALTA VELOCIDAD (ANTI-LAG & RTSP/TCP)
+# CLASE: CAPTURA DE VIDEO MULTIHILO ALTA VELOCIDAD (ANTI-FREEZE & WATCHDOG)
 # =====================================================================
 class ThreadedVideoCapture:
     def __init__(self, rtsp_url):
@@ -255,18 +255,21 @@ class ThreadedVideoCapture:
         self.ret = False
         self.frame = None
         self.running = False
+        self.last_frame_time = 0.0
         self.lock = threading.Lock()
         self.thread = None
         self._initialize_capture()
 
     def _initialize_capture(self):
         if self.cap is not None:
-            self.cap.release()
-        print(f"[VIDEO] Conectando a stream Hikvision RTSP/TCP: {self.rtsp_url}...")
-        self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-        self.cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer mínimo anti-lag
-        
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        print(f"[VIDEO] Abriendo stream Hikvision RTSP: {self.rtsp_url}...")
+        self.cap = cv2.VideoCapture(self.rtsp_url)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     def start(self):
         if self.running:
             return self
@@ -276,33 +279,39 @@ class ThreadedVideoCapture:
         return self
 
     def _update(self):
-        consecutive_failures = 0
-        max_failures = 30
         while self.running:
             if self.cap is None or not self.cap.isOpened():
-                print("[VIDEO] Conexión RTSP perdida. Reintentando...")
+                print("[VIDEO] Stream no disponible. Reconectando en 1s...")
+                time.sleep(1.0)
                 self._initialize_capture()
-                time.sleep(2)
                 continue
 
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                consecutive_failures += 1
-                if consecutive_failures >= max_failures:
-                    print("[WARNING] Reiniciando stream RTSP/TCP por falta de datos...")
-                    self._initialize_capture()
-                    consecutive_failures = 0
-                time.sleep(0.005)
-                continue
-            
-            consecutive_failures = 0
-            with self.lock:
-                self.ret = ret
-                self.frame = frame
-            time.sleep(0.001)
+            try:
+                # Usar grab() + retrieve() para descartar frames acumulados en el buffer
+                if not self.cap.grab():
+                    time.sleep(0.01)
+                    if time.time() - self.last_frame_time > 3.0:
+                        print("[WARNING] Watchdog: Stream congelado por >3s. Reiniciando conexión...")
+                        self._initialize_capture()
+                    continue
+
+                ret, frame = self.cap.retrieve()
+                if ret and frame is not None:
+                    with self.lock:
+                        self.ret = True
+                        self.frame = frame
+                        self.last_frame_time = time.time()
+                else:
+                    time.sleep(0.005)
+            except Exception as e:
+                print(f"[VIDEO EXCEPCIÓN] {e}")
+                time.sleep(0.5)
 
     def read(self):
         with self.lock:
+            # Si el último frame tiene más de 1 segundo de antigüedad, reportar como no disponible
+            if time.time() - self.last_frame_time > 1.0:
+                return False, None
             return self.ret, self.frame.copy() if self.frame is not None else None
 
     def stop(self):
@@ -670,9 +679,10 @@ def main():
                 except Exception as e:
                     print(f"[YOLO ERROR] {e}")
 
-            # Codificar siempre el frame procesado/anotado para el servidor MJPEG
+            # Codificar frame optimizado a 720p para transmisión fluida sin retardo
             try:
-                ok, jpeg_buf = cv2.imencode('.jpg', annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                preview = cv2.resize(annotated_frame, (1280, 720)) if (w > 1280) else annotated_frame
+                ok, jpeg_buf = cv2.imencode('.jpg', preview, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok:
                     with frame_lock:
                         latest_encoded_frame = jpeg_buf.tobytes()
