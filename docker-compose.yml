@@ -7,11 +7,11 @@ services:
     ports:
       - "8080:8080" # Servidor de video en vivo MJPEG para el navegador y SARI Brain Agent
     environment:
-      - CEREBRO_HOST=${CEREBRO_HOST:-192.168.1.79} # IP del servidor donde ejecuta SARI Brain Agent
+      - CEREBRO_HOST=${CEREBRO_HOST:-192.168.1.71} # IP activa del servidor SARI Brain Agent (PC/Laptop)
       - CEREBRO_PORT_WS=8765
       - CEREBRO_PORT_HTTP=8000
-      - CEREBRO_URL=ws://${CEREBRO_HOST:-192.168.1.79}:8765
-      - CEREBRO_HTTP_EVENT_URL=http://${CEREBRO_HOST:-192.168.1.79}:8000/api/alerts/event
+      - CEREBRO_URL=ws://${CEREBRO_HOST:-192.168.1.71}:8765
+      - CEREBRO_HTTP_EVENT_URL=http://${CEREBRO_HOST:-192.168.1.71}:8000/api/alerts/event
       - CONFIDENCE_THRESHOLD=0.70
       - STREAM_PORT=8080
       - CAMERA_IP=192.168.1.200
@@ -22,6 +22,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     volumes:
+      - ./camara_ptz.py:/app/camara_ptz.py
+      - ./telegram_alert.py:/app/telegram_alert.py
       - ./model_cache:/app/model_cache # Para cachear yolo26n.engine y no recompilar
     deploy:
       resources:
