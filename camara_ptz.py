@@ -261,14 +261,29 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=No
     }
     
     def _post():
-        try:
-            resp = requests.post(CEREBRO_HTTP_EVENT_URL, json=payload, timeout=3.0)
-            if resp.status_code in [200, 201, 202]:
-                print(f"[REST ALERT OK] Evidencia con captura enviada exitosamente a SARI Brain ({CEREBRO_HTTP_EVENT_URL}). Status: {resp.status_code}")
-            else:
-                print(f"[REST ALERT WARNING] SARI Brain respondió con HTTP {resp.status_code}")
-        except Exception as e:
-            print(f"[REST ALERT ERROR] No se pudo enviar evento HTTP al Cerebro ({CEREBRO_HTTP_EVENT_URL}): {e}")
+        candidate_urls = [
+            CEREBRO_HTTP_EVENT_URL,
+            "http://192.168.55.100:8000/api/alerts/event",
+            "http://192.168.1.71:8000/api/alerts/event"
+        ]
+        seen = set()
+        unique_urls = [u for u in candidate_urls if not (u in seen or seen.add(u))]
+
+        enviado = False
+        for url in unique_urls:
+            try:
+                resp = requests.post(url, json=payload, timeout=2.0)
+                if resp.status_code in [200, 201, 202]:
+                    print(f"[REST ALERT OK] Evidencia con captura enviada exitosamente a SARI Brain ({url}). Status: {resp.status_code}")
+                    enviado = True
+                    break
+                else:
+                    print(f"[REST ALERT WARNING] SARI Brain ({url}) respondió con HTTP {resp.status_code}")
+            except Exception:
+                continue
+
+        if not enviado:
+            print(f"[REST ALERT ERROR] No se pudo conectar con el backend de SARI Brain en ninguna de las URLs probadas: {unique_urls}")
 
     threading.Thread(target=_post, daemon=True).start()
 
