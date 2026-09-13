@@ -27,9 +27,12 @@ from requests.auth import HTTPDigestAuth
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 try:
+    import paho.mqtt.client as mqtt
     import paho.mqtt.publish as mqtt_publish
+    HAS_MQTT = True
     HAS_MQTT_PUBLISH = True
 except ImportError:
+    HAS_MQTT = False
     HAS_MQTT_PUBLISH = False
 
 # Importar módulo de alertas de Telegram (fallback / directo)
@@ -67,6 +70,7 @@ CEREBRO_PORT_HTTP = os.environ.get("CEREBRO_PORT_HTTP", "8000")
 CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_WS}")
 CEREBRO_HTTP_EVENT_URL = os.environ.get("CEREBRO_HTTP_EVENT_URL", f"http://{CEREBRO_HOST}:{CEREBRO_PORT_HTTP}/api/alerts/event")
 
+NODE_ID = os.environ.get("JETSON_NODE_ID", "Jetson-PTZ_1")
 MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "192.168.1.71")
 MQTT_BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", 1883))
 MQTT_USER = os.environ.get("MQTT_USER", "sari_operator")
@@ -301,13 +305,12 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=No
         if HAS_MQTT_PUBLISH:
             try:
                 alert_payload_mqtt = {
-                    "camara_id": f"Jetson-{camera_id}",
+                    "node_id": NODE_ID,
                     "event_type": "intrusion",
-                    "confidence": round(confidence, 2),
-                    "message": f"Intrusion detectada en zona perimetral: {reason}",
                     "severity": "high",
-                    "snapshot": snapshot_data_url or image_base64,
-                    "ip": NODE_IP
+                    "message": "Intrusión verificada en perímetro",
+                    "confidence": round(confidence, 2),
+                    "snapshot": image_base64 or ""
                 }
                 mqtt_publish.single(
                     topic="sari/alerts",
@@ -318,7 +321,7 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=No
                     auth={"username": MQTT_USER, "password": MQTT_PASS},
                     keepalive=10
                 )
-                print(f"[MQTT ALERT OK] Alerta publicada exitosamente en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT} topic sari/alerts")
+                print(f"[MQTT ALERT OK] Alerta de intrusión con snapshot base64 publicada en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT} topic sari/alerts")
             except Exception as e_mqtt:
                 print(f"[MQTT ALERT WARNING] No se pudo publicar alerta en MQTT: {e_mqtt}")
 
@@ -586,6 +589,62 @@ def iniciar_hilo_websocket():
 
 
 # =====================================================================
+# HILO DE ESCUCHA MQTT: CONFIGURACIÓN DINÁMICA EN VIVO
+# =====================================================================
+def iniciar_hilo_mqtt_config():
+    """Se suscribe a sari/nodes/{node_id}/config para actualizar parámetros en vivo sin reiniciar."""
+    if not HAS_MQTT:
+        print("[MQTT CONFIG] Módulo paho-mqtt no disponible. Escucha de config desactivada.")
+        return
+
+    topic_config = f"sari/nodes/{NODE_ID}/config"
+
+    def on_connect(client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            print(f"[MQTT CONFIG] Conectado al broker MQTT en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
+            client.subscribe(topic_config, qos=1)
+            print(f"[MQTT CONFIG] Suscrito a {topic_config} para configuración dinámica en vivo.")
+        else:
+            print(f"[MQTT CONFIG WARNING] Error conectando a broker MQTT, rc={rc}")
+
+    def on_message(client, userdata, msg):
+        global CONFIDENCE_THRESHOLD
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+            print(f"[MQTT CONFIG] Mensaje de configuración recibido en {msg.topic}: {payload}")
+
+            # 1. Actualización de umbral de confianza YOLO
+            if "yolo_confidence" in payload:
+                nuevo_umbral = float(payload["yolo_confidence"])
+                if 0.1 <= nuevo_umbral <= 0.99:
+                    CONFIDENCE_THRESHOLD = nuevo_umbral
+                    print(f"[MQTT CONFIG OK] Umbral de confianza actualizado dinámicamente a {round(CONFIDENCE_THRESHOLD * 100, 1)}%")
+
+            # 2. Estado activo / tracking
+            if "active" in payload:
+                estado_global["auto_tracking"] = bool(payload["active"])
+                print(f"[MQTT CONFIG OK] Auto-tracking actualizado a: {estado_global['auto_tracking']}")
+
+        except Exception as e:
+            print(f"[MQTT CONFIG ERROR] Error procesando mensaje de configuración: {e}")
+
+    def _mqtt_loop():
+        while True:
+            try:
+                client = mqtt.Client(client_id=f"jetson_vision_config_{NODE_ID}")
+                client.username_pw_set(MQTT_USER, MQTT_PASS)
+                client.on_connect = on_connect
+                client.on_message = on_message
+                client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=30)
+                client.loop_forever()
+            except Exception as e:
+                print(f"[MQTT CONFIG RECONNECT] Reconectando escucha MQTT en 5s... ({e})")
+                time.sleep(5.0)
+
+    threading.Thread(target=_mqtt_loop, daemon=True, name="MQTTConfigThread").start()
+
+
+# =====================================================================
 # BUCLE PRINCIPAL DE PROCESAMIENTO (OPENCV + YOLO + TRACKING SUAVE + MJPEG)
 # =====================================================================
 def main():
@@ -600,9 +659,10 @@ def main():
     with frame_lock:
         latest_encoded_frame = crear_frame_espera("CONECTANDO A CÁMARA HIKVISION...")
 
-    # 1. Iniciar Hilo de WebSockets
+    # 1. Iniciar Hilos de Comunicación (WebSockets y MQTT Config en Vivo)
     ws_thread = threading.Thread(target=iniciar_hilo_websocket, daemon=True, name="WebSocketThread")
     ws_thread.start()
+    iniciar_hilo_mqtt_config()
 
     # 2. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
     iniciar_servidor_stream_video()
@@ -683,7 +743,7 @@ def main():
                                 # Loguear en consola (máximo 1 vez por segundo)
                                 if not hasattr(main, "_last_det_log") or (now_log_time - main._last_det_log >= 1.0):
                                     main._last_det_log = now_log_time
-                                    print(f"[DETECCIÓN ≥70%] Persona detectada — Confianza: {round(conf_val * 100, 1)}% | BBox: [{x1}, {y1}, {x2}, {y2}]")
+                                    print(f"[DETECCIÓN ≥{int(CONFIDENCE_THRESHOLD*100)}%] Persona detectada — Confianza: {round(conf_val * 100, 1)}% | BBox: [{x1}, {y1}, {x2}, {y2}]")
                                 
                                 detecciones_payload.append({
                                     "clase": "persona",
