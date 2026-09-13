@@ -26,6 +26,12 @@ from requests.auth import HTTPDigestAuth
 # Forzar transporte TCP en FFMPEG/OpenCV para evitar artefactos, desincronización y pantallas negras en Hikvision
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
+try:
+    import paho.mqtt.publish as mqtt_publish
+    HAS_MQTT_PUBLISH = True
+except ImportError:
+    HAS_MQTT_PUBLISH = False
+
 # Importar módulo de alertas de Telegram (fallback / directo)
 from telegram_alert import enviar_alerta_telegram
 
@@ -60,6 +66,12 @@ CEREBRO_PORT_HTTP = os.environ.get("CEREBRO_PORT_HTTP", "8000")
 
 CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_WS}")
 CEREBRO_HTTP_EVENT_URL = os.environ.get("CEREBRO_HTTP_EVENT_URL", f"http://{CEREBRO_HOST}:{CEREBRO_PORT_HTTP}/api/alerts/event")
+
+MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "192.168.1.71")
+MQTT_BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", 1883))
+MQTT_USER = os.environ.get("MQTT_USER", "sari_operator")
+MQTT_PASS = os.environ.get("MQTT_PASSWORD", "sari_secure_password_2026")
+NODE_IP = os.environ.get("JETSON_NODE_IP", "192.168.1.77")
 
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.70"))
 STREAM_PORT = int(os.environ.get("STREAM_PORT", "8080"))
@@ -284,6 +296,31 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=No
 
         if not enviado:
             print(f"[REST ALERT ERROR] No se pudo conectar con el backend de SARI Brain en ninguna de las URLs probadas: {unique_urls}")
+
+        # Publicación al broker MQTT del Cerebro (Topic: sari/alerts, QoS=1)
+        if HAS_MQTT_PUBLISH:
+            try:
+                alert_payload_mqtt = {
+                    "camara_id": f"Jetson-{camera_id}",
+                    "event_type": "intrusion",
+                    "confidence": round(confidence, 2),
+                    "message": f"Intrusion detectada en zona perimetral: {reason}",
+                    "severity": "high",
+                    "snapshot": snapshot_data_url or image_base64,
+                    "ip": NODE_IP
+                }
+                mqtt_publish.single(
+                    topic="sari/alerts",
+                    payload=json.dumps(alert_payload_mqtt),
+                    qos=1,
+                    hostname=MQTT_BROKER_HOST,
+                    port=MQTT_BROKER_PORT,
+                    auth={"username": MQTT_USER, "password": MQTT_PASS},
+                    keepalive=10
+                )
+                print(f"[MQTT ALERT OK] Alerta publicada exitosamente en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT} topic sari/alerts")
+            except Exception as e_mqtt:
+                print(f"[MQTT ALERT WARNING] No se pudo publicar alerta en MQTT: {e_mqtt}")
 
     threading.Thread(target=_post, daemon=True).start()
 

@@ -22,7 +22,8 @@ RUN pip3 install --no-cache-dir \
     opencv-python-headless \
     websockets \
     requests \
-    flask
+    flask \
+    paho-mqtt
 
 # Copiar el código fuente
 COPY camara_ptz.py .
