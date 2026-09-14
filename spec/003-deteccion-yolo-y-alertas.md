@@ -54,9 +54,47 @@ Especificar el flujo de inferencia acelerada por GPU, el seguimiento PTZ Hikvisi
 
 ---
 
-## 5. Control Dinámico desde el Cerebro
+## 5. Control Dinámico y Operación Manual desde SARI Cerebro
 
+### 5.1 Interruptor de Seguimiento de Humanos (Tracking Toggle)
+- **Tópico de Entrada**: `sari/nodes/{NODE_ID}/tracking`
+- **QoS**: `1`
+- **Esquema de Payload**:
+  ```json
+  {
+    "enabled": false
+  }
+  ```
+- **Comportamiento**:
+  - `enabled: true` — Activa el bucle automático de seguimiento continuo y centrado en la persona detectada por YOLO.
+  - `enabled: false` — Pausa inmediatamente el seguimiento PTZ y detiene los motores. La cámara mantiene la posición fija actual o la seleccionada manualmente por el operador táctico, manteniendo la inferencia YOLO y streaming activos.
+
+### 5.2 Comandos de Movimiento Manual PTZ (D-Pad / Click & Drag / Zoom)
+- **Tópico de Entrada**: `sari/nodes/{NODE_ID}/ptz`
+- **QoS**: `0`
+- **Esquemas Aceptados**:
+  - **D-Pad / Acciones Fijas**:
+    ```json
+    {
+      "action": "up" | "down" | "left" | "right" | "center" | "stop" | "zoom_in" | "zoom_out"
+    }
+    ```
+  - **Modo Proporcional / Click & Drag / Joystick**:
+    ```json
+    {
+      "action": "move",
+      "pan_delta": 45,
+      "tilt_delta": -20,
+      "zoom_delta": 0
+    }
+    ```
+- **Comportamiento**:
+  - Los pulsos de D-Pad o deltas aplican movimiento con velocidad ajustada y auto-detención tras ventana de 0.35s de inactividad para evitar desbordes de ángulo.
+  - `stop` detiene inmediatamente cualquier movimiento en curso.
+
+### 5.3 Configuración en Vivo de Parámetros
 - **Tópico de Entrada**: `sari/nodes/{NODE_ID}/config`
+- **QoS**: `1`
 - **Esquema Aceptado**:
   ```json
   {
@@ -64,4 +102,4 @@ Especificar el flujo de inferencia acelerada por GPU, el seguimiento PTZ Hikvisi
     "confidence_threshold": 0.65
   }
   ```
-- **Acción**: Si `ptz_tracking` es `false`, la Jetson frena los comandos continuos de movimiento PTZ, permitiendo que el Módulo Cerebro mantenga la vista fija en la zona de intrusión.
+- **Acción**: Permite ajustar en caliente el umbral de confianza YOLO o pausar tracking sin reiniciar el contenedor.

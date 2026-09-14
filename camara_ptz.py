@@ -81,6 +81,17 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.70"))
 STREAM_PORT = int(os.environ.get("STREAM_PORT", "8080"))
 RTSP_URL = f"rtsp://{USERNAME}:{PASSWORD}@{CAMERA_IP}:554/Streaming/Channels/101"
 
+# Tópicos de control MQTT
+TOPIC_PTZ = f"sari/nodes/{NODE_ID}/ptz"
+TOPIC_TRACKING = f"sari/nodes/{NODE_ID}/tracking"
+TOPIC_CONFIG = f"sari/nodes/{NODE_ID}/config"
+
+# Variable de estado de seguimiento (Control Central SARI Cerebro)
+human_tracking_active = True
+ptz_controlador = None
+_manual_timer = None
+_manual_lock = threading.Lock()
+
 # Estado Compartido
 estado_global = {
     "auto_tracking": True,
@@ -418,8 +429,8 @@ class HikvisionPTZ:
         self.last_tilt = 0
         self.last_send_time = 0.0
 
-    def mover(self, pan, tilt, force=False):
-        if pan == 0 and tilt == 0:
+    def mover(self, pan, tilt, zoom=0, force=False):
+        if pan == 0 and tilt == 0 and zoom == 0:
             force = True
 
         now = time.time()
@@ -438,6 +449,7 @@ class HikvisionPTZ:
 <PTZData version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
     <pan>{int(pan)}</pan>
     <tilt>{int(tilt)}</tilt>
+    <zoom>{int(zoom)}</zoom>
 </PTZData>"""
         
         headers = {"Content-Type": "application/xml"}
@@ -454,7 +466,79 @@ class HikvisionPTZ:
         return True
 
     def detener(self):
-        return self.mover(0, 0, force=True)
+        return self.mover(0, 0, zoom=0, force=True)
+
+
+def ejecutar_comando_ptz_manual(action, pan_delta=0, tilt_delta=0, zoom_delta=0):
+    """Ejecuta comandos de movimiento manual PTZ recibidos de SARI Cerebro."""
+    global _manual_timer
+    if ptz_controlador is None:
+        print("[PTZ MANUAL] Controlador PTZ aún no inicializado.")
+        return
+
+    action_lower = str(action).lower() if action else ""
+
+    if action_lower == "stop":
+        with _manual_lock:
+            if _manual_timer and _manual_timer.is_alive():
+                _manual_timer.cancel()
+        ptz_controlador.detener()
+        return
+
+    pan_speed = 0
+    tilt_speed = 0
+    zoom_speed = 0
+    is_pulse = False
+
+    # 1. Comandos directos D-Pad
+    if action_lower == "up":
+        tilt_speed = 50
+        is_pulse = True
+    elif action_lower == "down":
+        tilt_speed = -50
+        is_pulse = True
+    elif action_lower == "left":
+        pan_speed = -50
+        is_pulse = True
+    elif action_lower == "right":
+        pan_speed = 50
+        is_pulse = True
+    elif action_lower == "center":
+        ptz_controlador.detener()
+        return
+    elif action_lower == "zoom_in":
+        zoom_speed = 50
+        is_pulse = True
+    elif action_lower == "zoom_out":
+        zoom_speed = -50
+        is_pulse = True
+    else:
+        # 2. Comandos Click & Drag / Joystick por deltas
+        if pan_delta != 0:
+            pan_speed = max(min(int(pan_delta), 100), -100)
+            is_pulse = True
+        if tilt_delta != 0:
+            tilt_speed = max(min(int(tilt_delta), 100), -100)
+            is_pulse = True
+        if zoom_delta != 0:
+            zoom_speed = max(min(int(zoom_delta), 100), -100)
+            is_pulse = True
+
+    with _manual_lock:
+        if _manual_timer and _manual_timer.is_alive():
+            _manual_timer.cancel()
+
+    ptz_controlador.mover(pan_speed, tilt_speed, zoom_speed, force=True)
+
+    # Si es un pulso manual, auto-detener tras 0.35s de inactividad
+    if is_pulse:
+        def _auto_stop():
+            time.sleep(0.35)
+            if ptz_controlador is not None:
+                ptz_controlador.detener()
+        with _manual_lock:
+            _manual_timer = threading.Thread(target=_auto_stop, daemon=True)
+            _manual_timer.start()
 
 
 # =====================================================================
@@ -567,9 +651,13 @@ async def recibir_comandos(ws):
             comando = datos.get("comando")
             
             if comando == "set_tracking":
+                global human_tracking_active
                 nuevo_estado = datos.get("estado", True)
-                estado_global["auto_tracking"] = nuevo_estado
+                human_tracking_active = bool(nuevo_estado)
+                estado_global["auto_tracking"] = human_tracking_active
                 print(f"[COMANDO] Auto-tracking cambiado a: {nuevo_estado}")
+                if not human_tracking_active and ptz_controlador is not None:
+                    ptz_controlador.detener()
                 
             elif comando == "telegram_alert":
                 texto = datos.get("mensaje", "Alerta desde el Módulo Ojo")
@@ -589,59 +677,85 @@ def iniciar_hilo_websocket():
 
 
 # =====================================================================
-# HILO DE ESCUCHA MQTT: CONFIGURACIÓN DINÁMICA EN VIVO
+# HILO DE ESCUCHA MQTT: CONTROL MANUAL PTZ, TRACKING Y CONFIGURACIÓN
 # =====================================================================
-def iniciar_hilo_mqtt_config():
-    """Se suscribe a sari/nodes/{node_id}/config para actualizar parámetros en vivo sin reiniciar."""
+def iniciar_hilo_mqtt_control():
+    """Escucha comandos manuales PTZ, interruptor de seguimiento de humanos y config dinámica."""
     if not HAS_MQTT:
-        print("[MQTT CONFIG] Módulo paho-mqtt no disponible. Escucha de config desactivada.")
+        print("[MQTT CONTROL] Módulo paho-mqtt no disponible. Escucha desactivada.")
         return
 
-    topic_config = f"sari/nodes/{NODE_ID}/config"
-
     def on_connect(client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            print(f"[MQTT CONFIG] Conectado al broker MQTT en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
-            client.subscribe(topic_config, qos=1)
-            print(f"[MQTT CONFIG] Suscrito a {topic_config} para configuración dinámica en vivo.")
+        if rc == 0 or str(rc) == "Success":
+            client.subscribe(TOPIC_PTZ, qos=0)
+            client.subscribe(TOPIC_TRACKING, qos=1)
+            client.subscribe(TOPIC_CONFIG, qos=1)
+            print(f"[JETSON] Conectado a SARI Cerebro en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}")
+            print(f"[JETSON] Suscrito a comandos PTZ y Tracking en {TOPIC_PTZ}")
+            print(f"[JETSON] Suscrito a control de tracking en {TOPIC_TRACKING}")
+            print(f"[JETSON] Suscrito a config dinámica en {TOPIC_CONFIG}")
         else:
-            print(f"[MQTT CONFIG WARNING] Error conectando a broker MQTT, rc={rc}")
+            print(f"[MQTT CONTROL WARNING] Error de conexión MQTT, rc={rc}")
 
     def on_message(client, userdata, msg):
-        global CONFIDENCE_THRESHOLD
+        global human_tracking_active, CONFIDENCE_THRESHOLD
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
-            print(f"[MQTT CONFIG] Mensaje de configuración recibido en {msg.topic}: {payload}")
 
-            # 1. Actualización de umbral de confianza YOLO
-            if "yolo_confidence" in payload:
-                nuevo_umbral = float(payload["yolo_confidence"])
-                if 0.1 <= nuevo_umbral <= 0.99:
-                    CONFIDENCE_THRESHOLD = nuevo_umbral
-                    print(f"[MQTT CONFIG OK] Umbral de confianza actualizado dinámicamente a {round(CONFIDENCE_THRESHOLD * 100, 1)}%")
+            # 1. Comando de Seguimiento de Humanos
+            if msg.topic == TOPIC_TRACKING:
+                human_tracking_active = bool(payload.get("enabled", True))
+                estado_global["auto_tracking"] = human_tracking_active
+                print(f"[TRACKING] Seguimiento de humanos {'ACTIVADO' if human_tracking_active else 'PAUSADO'}")
+                if not human_tracking_active and ptz_controlador is not None:
+                    ptz_controlador.detener()
 
-            # 2. Estado activo / tracking
-            if "active" in payload:
-                estado_global["auto_tracking"] = bool(payload["active"])
-                print(f"[MQTT CONFIG OK] Auto-tracking actualizado a: {estado_global['auto_tracking']}")
+            # 2. Comandos de Movimiento Manual PTZ (Click & Drag / D-Pad / Zoom)
+            elif msg.topic == TOPIC_PTZ:
+                action = payload.get("action")
+                pan_delta = payload.get("pan_delta", 0)
+                tilt_delta = payload.get("tilt_delta", 0)
+                zoom_delta = payload.get("zoom_delta", 0)
+                print(f"[PTZ] Moviendo cámara: {action} (Pan: {pan_delta}, Tilt: {tilt_delta}, Zoom: {zoom_delta})")
+                ejecutar_comando_ptz_manual(action, pan_delta, tilt_delta, zoom_delta)
+
+            # 3. Configuración dinámica (sari/nodes/{NODE_ID}/config)
+            elif msg.topic == TOPIC_CONFIG:
+                print(f"[MQTT CONFIG] Mensaje de configuración recibido en {msg.topic}: {payload}")
+                if "yolo_confidence" in payload:
+                    nuevo_umbral = float(payload["yolo_confidence"])
+                    if 0.1 <= nuevo_umbral <= 0.99:
+                        CONFIDENCE_THRESHOLD = nuevo_umbral
+                        print(f"[MQTT CONFIG OK] Umbral de confianza actualizado a {round(CONFIDENCE_THRESHOLD * 100, 1)}%")
+
+                if "active" in payload or "ptz_tracking" in payload:
+                    val = payload.get("ptz_tracking", payload.get("active", True))
+                    human_tracking_active = bool(val)
+                    estado_global["auto_tracking"] = human_tracking_active
+                    print(f"[MQTT CONFIG OK] Auto-tracking actualizado a: {human_tracking_active}")
+                    if not human_tracking_active and ptz_controlador is not None:
+                        ptz_controlador.detener()
 
         except Exception as e:
-            print(f"[MQTT CONFIG ERROR] Error procesando mensaje de configuración: {e}")
+            print(f"[ERROR] Procesando mensaje MQTT: {e}")
 
     def _mqtt_loop():
         while True:
             try:
-                client = mqtt.Client(client_id=f"jetson_vision_config_{NODE_ID}")
+                try:
+                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"jetson_vision_ctrl_{NODE_ID}")
+                except Exception:
+                    client = mqtt.Client(client_id=f"jetson_vision_ctrl_{NODE_ID}")
                 client.username_pw_set(MQTT_USER, MQTT_PASS)
                 client.on_connect = on_connect
                 client.on_message = on_message
                 client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=30)
                 client.loop_forever()
             except Exception as e:
-                print(f"[MQTT CONFIG RECONNECT] Reconectando escucha MQTT en 5s... ({e})")
+                print(f"[MQTT CONTROL RECONNECT] Reconectando escucha MQTT en 5s... ({e})")
                 time.sleep(5.0)
 
-    threading.Thread(target=_mqtt_loop, daemon=True, name="MQTTConfigThread").start()
+    threading.Thread(target=_mqtt_loop, daemon=True, name="MQTTControlThread").start()
 
 
 # =====================================================================
@@ -659,19 +773,21 @@ def main():
     with frame_lock:
         latest_encoded_frame = crear_frame_espera("CONECTANDO A CÁMARA HIKVISION...")
 
-    # 1. Iniciar Hilos de Comunicación (WebSockets y MQTT Config en Vivo)
+    # 1. Inicializar PTZ y vincular controlador global para comandos manuales
+    global ptz_controlador
+    ptz = HikvisionPTZ(ip=CAMERA_IP, username=USERNAME, password=PASSWORD)
+    ptz_controlador = ptz
+
+    # 2. Iniciar Hilos de Comunicación (WebSockets y Control MQTT PTZ / Tracking)
     ws_thread = threading.Thread(target=iniciar_hilo_websocket, daemon=True, name="WebSocketThread")
     ws_thread.start()
-    iniciar_hilo_mqtt_config()
+    iniciar_hilo_mqtt_control()
 
-    # 2. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
+    # 3. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
     iniciar_servidor_stream_video()
 
-    # 3. Cargar Modelo YOLO
+    # 4. Cargar Modelo YOLO y Captura de Video (RTSP/TCP)
     model = cargar_modelo_yolo()
-    
-    # 4. Inicializar PTZ y Captura de Video (RTSP/TCP)
-    ptz = HikvisionPTZ(ip=CAMERA_IP, username=USERNAME, password=PASSWORD)
     capture = ThreadedVideoCapture(rtsp_url=RTSP_URL)
     capture.start()
 
@@ -757,37 +873,44 @@ def main():
                                     best_coords = (px, py, conf_val)
 
                     # ALGORITMO DE SEGUIMIENTO PTZ CONTINUO Y SUAVE
-                    if best_coords is not None and estado_global["auto_tracking"]:
-                        px, py, conf_target = best_coords
-                        offset_x, offset_y = px - cx, cy - py
-                        norm_x, norm_y = offset_x / cx, offset_y / cy
-                        
-                        deadzone = 0.08
-                        pan_speed, tilt_speed = 0, 0
-                        
-                        if abs(norm_x) > deadzone:
-                            sign_x = 1 if norm_x > 0 else -1
-                            norm_dist_x = (abs(norm_x) - deadzone) / (1.0 - deadzone)
-                            pan_speed = int(sign_x * (20 + (norm_dist_x ** 1.1) * 80))
+                    if best_coords is not None:
+                        if human_tracking_active and estado_global["auto_tracking"]:
+                            # Ejecutar seguimiento automático centrado en el bbox de la persona
+                            px, py, conf_target = best_coords
+                            offset_x, offset_y = px - cx, cy - py
+                            norm_x, norm_y = offset_x / cx, offset_y / cy
                             
-                        if abs(norm_y) > deadzone:
-                            sign_y = 1 if norm_y > 0 else -1
-                            norm_dist_y = (abs(norm_y) - deadzone) / (1.0 - deadzone)
-                            tilt_speed = int(sign_y * (20 + (norm_dist_y ** 1.1) * 80))
+                            deadzone = 0.08
+                            pan_speed, tilt_speed = 0, 0
                             
-                        pan_speed = max(min(pan_speed, 100), -100)
-                        tilt_speed = max(min(tilt_speed, 100), -100)
-                        
-                        now_time = time.time()
-                        if pan_speed == 0 and tilt_speed == 0:
+                            if abs(norm_x) > deadzone:
+                                sign_x = 1 if norm_x > 0 else -1
+                                norm_dist_x = (abs(norm_x) - deadzone) / (1.0 - deadzone)
+                                pan_speed = int(sign_x * (20 + (norm_dist_x ** 1.1) * 80))
+                                
+                            if abs(norm_y) > deadzone:
+                                sign_y = 1 if norm_y > 0 else -1
+                                norm_dist_y = (abs(norm_y) - deadzone) / (1.0 - deadzone)
+                                tilt_speed = int(sign_y * (20 + (norm_dist_y ** 1.1) * 80))
+                                
+                            pan_speed = max(min(pan_speed, 100), -100)
+                            tilt_speed = max(min(tilt_speed, 100), -100)
+                            
+                            now_time = time.time()
+                            if pan_speed == 0 and tilt_speed == 0:
+                                if was_moving:
+                                    ptz.detener()
+                                    was_moving = False
+                            else:
+                                if (now_time - last_ptz_send_time >= ptz_command_cooldown) or not was_moving:
+                                    ptz.mover(pan_speed, tilt_speed)
+                                    last_ptz_send_time = now_time
+                                    was_moving = True
+                        else:
+                            # La cámara mantiene la posición fija o manual seleccionada por el operador
                             if was_moving:
                                 ptz.detener()
                                 was_moving = False
-                        else:
-                            if (now_time - last_ptz_send_time >= ptz_command_cooldown) or not was_moving:
-                                ptz.mover(pan_speed, tilt_speed)
-                                last_ptz_send_time = now_time
-                                was_moving = True
                                 
                     # CONTROL DE ALERTAS DE INTRUSIÓN PROLONGADA (> 5 SEGUNDOS)
                     if best_coords is not None:
