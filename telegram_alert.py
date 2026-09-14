@@ -13,8 +13,8 @@ def enviar_alerta_telegram(mensaje: str, token: str = None, chat_id: str = None)
     Returns:
         bool: True si se envió correctamente, False en caso de error.
     """
-    bot_token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
-    target_chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    bot_token = token or os.environ.get("TELEGRAM_BOT_TOKEN", "8990032616:AAFT732S-Q46GAaNXRs3bEs0-JidOZE7tjQ")
+    target_chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "7170575800")
     
     if not bot_token or not target_chat_id:
         print("[TELEGRAM] Error: Faltan credenciales (TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID).")

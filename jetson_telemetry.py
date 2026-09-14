@@ -16,8 +16,8 @@ MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
 MQTT_USER = os.environ.get("MQTT_USER", "sari_operator")
 MQTT_PASS = os.environ.get("MQTT_PASS", "sari_secure_password_2026")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8990032616:AAFT732S-Q46GAaNXRs3bEs0-JidOZE7tjQ")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7170575800")
 
 # Compatibilidad con Paho MQTT v1 y v2
 try:
