@@ -7,7 +7,7 @@ seguimiento PTZ Hikvision ultra-fluido (25Hz) y Servidor de Video en Vivo MJPEG 
 Comunica telemetría y alertas al Módulo Cerebro (SARI Brain Agent) mediante:
   1. WebSockets: ws://<CEREBRO_HOST>:8765
   2. REST API: CEREBRO_HTTP_EVENT_URL (POST /api/alerts/event on the brain, port 7000, X-SARI-Node-Key)
-  3. Servidor de Video Web MJPEG: http://0.0.0.0:8080/video_feed (o /mjpeg)
+  3. Servidor de Video Web MJPEG autenticado: http://<STREAM_BIND>:<STREAM_PORT>/mjpeg?token=<EYES_STREAM_TOKEN>
 """
 
 import os
@@ -50,17 +50,13 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
-try:
-    from flask import Flask, Response
-    FLASK_AVAILABLE = True
-except ImportError:
-    FLASK_AVAILABLE = False
 
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
 from sari_eyes.alerts import build_alert_payload, encode_snapshot
 from sari_eyes.config import load_settings, redact_url
+from sari_eyes.stream import FrameBuffer, start_stream_server
 from sari_eyes.transport import mqtt as mqtt_transport
 from sari_eyes.transport import rest as rest_transport
 
@@ -107,9 +103,8 @@ estado_global = {
 
 telemetria_queue = queue.Queue(maxsize=10)
 
-# Buffer para transmisión de video MJPEG
-frame_lock = threading.Lock()
-latest_encoded_frame = None
+# Buffer para transmisión de video MJPEG (thread-safe)
+FRAME_BUFFER = FrameBuffer()
 
 
 # =====================================================================
@@ -134,124 +129,6 @@ def crear_frame_espera(mensaje="CONECTANDO A CAMARA HIKVISION..."):
     
     ret, buffer = cv2.imencode('.jpg', img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     return buffer.tobytes() if ret else b''
-
-
-# =====================================================================
-# SERVIDOR HTTP DE TRANSMISIÓN DE VIDEO MJPEG EN VIVO (PUERTO 8080)
-# =====================================================================
-def _generar_frames_mjpeg():
-    """Generador continuo de frames JPEG codificados para el stream web de la interfaz SOC."""
-    while True:
-        with frame_lock:
-            jpeg_bytes = latest_encoded_frame
-
-        if jpeg_bytes is None:
-            jpeg_bytes = crear_frame_espera("INICIALIZANDO STREAM EN VIVO...")
-
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + jpeg_bytes + b'\r\n')
-        time.sleep(0.04)  # ~25 FPS estables
-
-
-def iniciar_servidor_stream_video():
-    """Inicia el servidor HTTP de transmisión de video en segundo plano (Flask o Native HTTP)."""
-    if FLASK_AVAILABLE:
-        app = Flask(__name__)
-
-        @app.after_request
-        def add_cors_headers(response):
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Headers'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-            return response
-
-        @app.route('/video_feed')
-        @app.route('/stream')
-        @app.route('/mjpeg')
-        def video_feed():
-            return Response(_generar_frames_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-        @app.route('/snapshot')
-        def snapshot():
-            with frame_lock:
-                data = latest_encoded_frame
-            if data is None:
-                data = crear_frame_espera("SNAPSHOT INICIALIZANDO...")
-            return Response(data, mimetype='image/jpeg')
-
-        @app.route('/')
-        def index():
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>SARI Módulo Ojos — Video en Vivo</title>
-                <style>
-                    body {{ background: #0f172a; color: #f8fafc; font-family: monospace; text-align: center; margin: 0; padding: 20px; }}
-                    h2 {{ color: #38bdf8; }}
-                    img {{ border: 2px solid #38bdf8; border-radius: 8px; max-width: 960px; width: 100%; height: auto; box-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }}
-                    .badge {{ background: #22c55e; color: #000; padding: 4px 8px; border-radius: 4px; font-weight: bold; }}
-                </style>
-            </head>
-            <body>
-                <h2>👁️ SARI Módulo Ojos — Transmisión Web MJPEG</h2>
-                <p><span class="badge">EN VIVO</span> Cámara Hikvision PTZ con Superposición YOLO26n (RTSP/TCP)</p>
-                <img src="/mjpeg" alt="Cámara PTZ en vivo" />
-            </body>
-            </html>
-            """
-            return Response(html_content, mimetype='text/html')
-
-        print(f"[STREAM VIDEO] Servidor Flask en vivo escuchando en http://0.0.0.0:{STREAM_PORT}/mjpeg")
-        threading.Thread(
-            target=lambda: app.run(host='0.0.0.0', port=STREAM_PORT, debug=False, use_reloader=False),
-            daemon=True,
-            name="MJPEGStreamThread"
-        ).start()
-    else:
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        from socketserver import ThreadingMixIn
-
-        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-            daemon_threads = True
-
-        class MJPEGHandler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
-                pass
-
-            def do_GET(self):
-                if self.path in ['/video_feed', '/stream', '/mjpeg']:
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=frame')
-                    self.end_headers()
-                    try:
-                        for chunk in _generar_frames_mjpeg():
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                    except Exception:
-                        pass
-                elif self.path == '/snapshot':
-                    with frame_lock:
-                        data = latest_encoded_frame
-                    if not data:
-                        data = crear_frame_espera("SNAPSHOT INICIALIZANDO...")
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'image/jpeg')
-                    self.end_headers()
-                    self.wfile.write(data)
-                else:
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html')
-                    self.end_headers()
-                    html = f"<html><body style='background:#0f172a;color:#fff;text-align:center;'><h2>👁️ SARI Módulo Ojos</h2><img src='/mjpeg' style='max-width:900px;'/></body></html>"
-                    self.wfile.write(html.encode('utf-8'))
-
-        def _run_native():
-            server = ThreadedHTTPServer(('0.0.0.0', STREAM_PORT), MJPEGHandler)
-            print(f"[STREAM VIDEO] Servidor HTTP Nativo escuchando en http://0.0.0.0:{STREAM_PORT}/mjpeg")
-            server.serve_forever()
-
-        threading.Thread(target=_run_native, daemon=True, name="MJPEGStreamThread").start()
 
 
 # =====================================================================
@@ -696,16 +573,13 @@ def iniciar_hilo_mqtt_control():
 # BUCLE PRINCIPAL DE PROCESAMIENTO (OPENCV + YOLO + TRACKING SUAVE + MJPEG)
 # =====================================================================
 def main():
-    global latest_encoded_frame
-
     print("\n" + "=" * 60)
     print("  SARI — MÓDULO OJOS (Eye Node v2.0)")
     print("  Visión por Computadora Acelerada + Control PTZ + Stream MJPEG (8080)")
     print("=" * 60 + "\n")
     
     # Inicializar frame de espera inmediatamente para evitar pantallas negras al conectar
-    with frame_lock:
-        latest_encoded_frame = crear_frame_espera("CONECTANDO A CÁMARA HIKVISION...")
+    FRAME_BUFFER.set(crear_frame_espera("CONECTANDO A CÁMARA HIKVISION..."))
 
     # 1. Inicializar PTZ y vincular controlador global para comandos manuales
     global ptz_controlador
@@ -718,7 +592,13 @@ def main():
     iniciar_hilo_mqtt_control()
 
     # 3. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
-    iniciar_servidor_stream_video()
+    start_stream_server(
+        FRAME_BUFFER,
+        token=SETTINGS.stream_token,
+        bind=SETTINGS.stream_bind,
+        port=SETTINGS.stream_port,
+        placeholder=lambda: crear_frame_espera("INICIALIZANDO STREAM EN VIVO..."),
+    )
 
     # 4. Cargar Modelo YOLO y Captura de Video (RTSP/TCP)
     model = cargar_modelo_yolo()
@@ -889,8 +769,7 @@ def main():
                 preview = cv2.resize(annotated_frame, (1280, 720)) if (w > 1280) else annotated_frame
                 ok, jpeg_buf = cv2.imencode('.jpg', preview, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 if ok:
-                    with frame_lock:
-                        latest_encoded_frame = jpeg_buf.tobytes()
+                    FRAME_BUFFER.set(jpeg_buf.tobytes())
             except Exception as e:
                 print(f"[ENCODE ERROR] {e}")
 

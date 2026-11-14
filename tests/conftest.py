@@ -20,6 +20,7 @@ def base_env(**overrides):
         "TELEGRAM_CHAT_ID": "12345",
         "SARI_NODE_KEY": "test-node-key",
         "CEREBRO_HTTP_EVENT_URL": "http://10.0.0.2:7000/api/alerts/event",
+        "EYES_STREAM_TOKEN": "test-stream-token-0123456789",
     }
     env.update(overrides)
     return {k: v for k, v in env.items() if v is not None}

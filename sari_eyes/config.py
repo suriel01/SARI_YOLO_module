@@ -23,6 +23,9 @@ LEGACY_NAMES = {
 }
 
 
+MIN_STREAM_TOKEN_LENGTH = 16
+
+
 def _value(env: Mapping[str, str], name: str) -> Optional[str]:
     raw = env.get(name)
     if raw is None:
@@ -91,7 +94,9 @@ class Settings:
     telegram_chat_id: str = field(repr=False)
     node_key: str = field(repr=False)
     cerebro_http_event_url: str
+    stream_token: str = field(repr=False)
     mqtt_tls_ca: Optional[str] = None
+    stream_bind: str = "0.0.0.0"
     node_ip: Optional[str] = None
     confidence_threshold: float = 0.70
     stream_port: int = 8080
@@ -115,6 +120,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     if tls_ca is not None and not os.path.isfile(tls_ca):
         raise ConfigError("MQTT_TLS_CA must point to an existing CA certificate file")
 
+    stream_token = require(env, "EYES_STREAM_TOKEN")
+    if len(stream_token) < MIN_STREAM_TOKEN_LENGTH:
+        raise ConfigError(f"EYES_STREAM_TOKEN must be at least {MIN_STREAM_TOKEN_LENGTH} characters")
+
     return Settings(
         node_id=node_id,
         camera_ip=require(env, "CAMERA_IP"),
@@ -128,7 +137,9 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         telegram_chat_id=require(env, "TELEGRAM_CHAT_ID"),
         node_key=require(env, "SARI_NODE_KEY"),
         cerebro_http_event_url=require(env, "CEREBRO_HTTP_EVENT_URL"),
+        stream_token=stream_token,
         mqtt_tls_ca=tls_ca,
+        stream_bind=optional(env, "STREAM_BIND", "0.0.0.0"),
         node_ip=optional(env, "JETSON_NODE_IP"),
         confidence_threshold=as_float(env, "CONFIDENCE_THRESHOLD", 0.70),
         stream_port=as_int(env, "STREAM_PORT", 8080),
