@@ -74,3 +74,15 @@ def test_tamper_payload_shape():
     p = build_tamper_payload(node_id="Jetson-PTZ_1", camera_id="PTZ_1", reason="rtsp_loss", snapshot_b64=None)
     assert p["event_type"] == "tamper" and p["reason"] == "rtsp_loss" and p["node_id"] == "Jetson-PTZ_1"
     assert p["severity"] == "high" and "auto_siren" not in p and p["snapshot"] is None
+
+
+def test_live_still_scene_with_sensor_noise_is_not_frozen(det):
+    rng = np.random.default_rng(3)
+    base = scene(11)
+    frames = []
+    for _ in range(30):
+        f = base.copy()
+        ys, xs = rng.integers(0, 120, 5), rng.integers(0, 160, 5)
+        f[ys, xs] ^= 1  # a handful of one-level noise flips, invisible after downscaling
+        frames.append(f)
+    assert run(det, frames)[0] == []

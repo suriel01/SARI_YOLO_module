@@ -6,6 +6,7 @@ reported, and each reason is reported at most once per ``cooldown_s``.
 from __future__ import annotations
 
 import time
+import zlib
 from typing import Dict, Optional
 
 import cv2
@@ -13,7 +14,6 @@ import numpy as np
 
 BLACK_MEAN = 15.0      # mean grey level below which the frame is considered black
 UNIFORM_STD = 8.0      # grey std below which the lens is considered covered (occluded)
-FROZEN_DIFF = 0.5      # mean abs difference below which two frames are identical
 
 
 class TamperDetector:
@@ -26,7 +26,7 @@ class TamperDetector:
         self.started_at = time.time()
         self._condition: Optional[str] = None
         self._since = 0.0
-        self._prev: Optional[np.ndarray] = None
+        self._prev_crc: Optional[int] = None
         self._prev_t = 0.0
         self._last_report: Dict[str, float] = {}
 
@@ -35,12 +35,14 @@ class TamperDetector:
         grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         return cv2.resize(grey, (64, 48), interpolation=cv2.INTER_AREA).astype(np.float32)
 
-    def _classify(self, grey: np.ndarray) -> Optional[str]:
+    def _classify(self, grey: np.ndarray, crc: int) -> Optional[str]:
         if grey.mean() < BLACK_MEAN:
             return "black_frame"
         if grey.std() < UNIFORM_STD:
             return "occluded"
-        if self._prev is not None and float(np.abs(grey - self._prev).mean()) < FROZEN_DIFF:
+        # Frozen means bit-identical full-resolution frames: a live sensor (noise, OSD clock)
+        # never repeats a frame exactly for frozen_s seconds, even when the scene is still.
+        if crc == self._prev_crc:
             return "frozen_frame"
         return None
 
@@ -54,12 +56,13 @@ class TamperDetector:
     def analyze(self, frame: np.ndarray, now: float) -> Optional[str]:
         """Feed one frame; returns a tamper reason when one should be reported."""
         grey = self._small_grey(frame)
-        condition = self._classify(grey)
+        crc = zlib.crc32(np.ascontiguousarray(frame).data)
+        condition = self._classify(grey, crc)
         if condition != self._condition:
             self._condition = condition
             # A frozen stream started with the previous (first identical) frame.
             self._since = self._prev_t if condition == "frozen_frame" else now
-        self._prev, self._prev_t = grey, now
+        self._prev_crc, self._prev_t = crc, now
 
         if condition is None:
             return None
