@@ -24,3 +24,12 @@ def base_env(**overrides):
     }
     env.update(overrides)
     return {k: v for k, v in env.items() if v is not None}
+
+
+def project_python_files():
+    """The project's own Python sources (entry points and the sari_eyes package)."""
+    return sorted(ROOT.glob("*.py")) + sorted((ROOT / "sari_eyes").rglob("*.py"))
+
+
+def project_code():
+    return "\n".join(p.read_text(encoding="utf-8") for p in project_python_files())

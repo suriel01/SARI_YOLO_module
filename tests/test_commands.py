@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, project_code
 from sari_eyes.commands import (CONFIDENCE_MAX, CONFIDENCE_MIN, CommandError, PtzCommand, decode,
                                 parse_config, parse_ptz, parse_tracking)
 
@@ -46,8 +46,8 @@ def test_ptz_deltas_in_range():
 
 @pytest.mark.parametrize("payload", [
     {"action": "self_destruct"},
-    {"pan_delta": 101},
-    {"tilt_delta": -1000},
+    {"pan_delta": 1001},
+    {"tilt_delta": -5000},
     {"zoom_delta": "fast"},
     {"pan_delta": True},
     {"pan_delta": float("nan")},
@@ -94,7 +94,46 @@ def test_config_ignores_unknown_keys():
 # --- WebSocket channel removed (the brain has no WebSocket server) ---
 
 def test_no_websocket_command_channel():
-    code = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.py")
-                     if ".venv" not in p.parts and "tests" not in p.parts)
+    code = project_code()
     assert "import websockets" not in code
     assert "8765" not in code
+
+
+def test_deeply_nested_json_is_a_command_error():
+    with pytest.raises(CommandError):
+        decode(b"[" * 4000 + b"]" * 0)
+    with pytest.raises(CommandError):
+        decode(b'{"a":' * 1300 + b"1" + b"}" * 1300)
+
+
+def test_huge_integer_is_a_command_error():
+    with pytest.raises(CommandError):
+        parse_ptz({"pan_delta": 10 ** 400})
+    with pytest.raises(CommandError):
+        parse_config({"yolo_confidence": 10 ** 400})
+
+
+
+# --- alignment with the brain UI (EyesModule drag + PTZPayload) ---
+
+@pytest.mark.parametrize("action", ["drag", "move", None])
+def test_drag_and_move_use_deltas(action):
+    assert parse_ptz({"action": action, "pan_delta": 45, "tilt_delta": -20, "zoom_delta": 0}) == PtzCommand(None, 45, -20, 0)
+
+
+def test_large_drag_deltas_are_clamped_to_camera_speed():
+    assert parse_ptz({"action": "drag", "pan_delta": 280, "tilt_delta": -150}) == PtzCommand(None, 100, -100, 0)
+
+
+def test_null_deltas_count_as_zero():
+    assert parse_ptz({"action": "drag", "pan_delta": 30, "tilt_delta": None, "zoom_delta": None}) == PtzCommand(None, 30, 0, 0)
+
+
+def test_named_action_ignores_deltas_sent_by_the_ui():
+    assert parse_ptz({"action": "zoom_in", "pan_delta": 0, "tilt_delta": 0, "zoom_delta": 1.0}) == PtzCommand("zoom_in")
+
+
+def test_brain_confidence_threshold_key_is_accepted_with_same_band():
+    assert parse_config({"node_id": "Jetson-PTZ_1", "confidence_threshold": 0.7, "stream_url": "x"}) == {"yolo_confidence": 0.7}
+    with pytest.raises(CommandError):
+        parse_config({"confidence_threshold": 0.95})
