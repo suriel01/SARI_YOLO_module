@@ -26,7 +26,7 @@ graph LR
 | :--- | :--- | :--- | :--- | :--- |
 | **[SPEC-001](./001-arquitectura-sari.md)** | Arquitectura General del Ecosistema SARI | `Aprobado` | Ojos & Cerebro | Separación de roles: Edge AI (Ojos) vs Agente Autónomo (Cerebro). |
 | **[SPEC-002](./002-telemetria-y-estado-mqtt.md)** | Telemetría Perimetral y Estado de Nodo | `Implementado` | Módulo Ojos | LWT, Birth message y reporte de salud de hardware cada 3s por MQTT. |
-| **[SPEC-003](./003-deteccion-yolo-y-alertas.md)** | Detección YOLO26n, PTZ y Alertas con Snapshot | `Implementado` | Módulo Ojos | Inferencia TensorRT FP16, tracking a 25Hz, `/snapshot` HTTP y `sari/alerts`. |
+| **[SPEC-003](./003-deteccion-yolo-y-alertas.md)** | Detección YOLO26n, PTZ y Alertas con Snapshot | `Implementado` | Módulo Ojos | Inferencia TensorRT FP16, tracking a 25Hz, `/snapshot` con token y alertas REST/`sari/nodes/<id>/alerts`. |
 | **[SPEC-004](./004-alertas-telegram-fallback.md)** | Canal Directo de Emergencias Telegram | `Implementado` | Módulo Ojos | Fallback inmediato sin intermediación para eventos críticos. |
 
 ---

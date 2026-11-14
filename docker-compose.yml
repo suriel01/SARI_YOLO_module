@@ -5,16 +5,18 @@ services:
     restart: unless-stopped
     runtime: nvidia # Habilita el runtime de NVIDIA para acceso a la GPU
     ports:
-      - "8080:8080" # Servidor de video en vivo MJPEG para el navegador y SARI Brain Agent
+      - "8080:8080" # Authenticated MJPEG/snapshot server (EYES_STREAM_TOKEN)
     env_file:
       - .env # local only, never committed; template in .env.example
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    # Runs as the unprivileged `sari` user (uid 10001): `sudo chown -R 10001:10001 model_cache alert_queue`
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
-      - ./camara_ptz.py:/app/camara_ptz.py
-      - ./telegram_alert.py:/app/telegram_alert.py
-      - ./sari_eyes:/app/sari_eyes
       - ./model_cache:/app/model_cache # Para cachear yolo26n.engine y no recompilar
       - ./alert_queue:/app/alert_queue # persistent undelivered alerts (survives restarts)
     deploy:

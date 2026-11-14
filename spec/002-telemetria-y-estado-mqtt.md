@@ -15,7 +15,8 @@ Garantizar la visibilidad en tiempo real del estado operativo, salud de hardware
 
 ## 2. Contrato de Mensajería MQTT
 
-- **Broker**: `192.168.1.71:1883` (o variable `MQTT_BROKER_HOST`)
+- **Broker**: `MQTT_BROKER_HOST:MQTT_BROKER_PORT` (1883, u 8883 con `MQTT_TLS_CA`). Usuario MQTT = `JETSON_NODE_ID`, contraseña `MQTT_PASSWORD`; ambos en `/etc/sari/jetson.env` (ver `deploy/`).
+- **Fallback HTTP**: si MQTT cae, `POST CEREBRO_HTTP_TELEMETRY_URL` (`/api/telemetry/node`, puerto 7000) con cabecera `X-SARI-Node-Key: $SARI_NODE_KEY`.
 - **Autenticación**: Usuario `sari_operator`, Clave `sari_secure_password_2026`
 - **Client ID**: `jetson_{NODE_ID}`
 
@@ -59,7 +60,7 @@ Garantizar la visibilidad en tiempo real del estado operativo, salud de hardware
     "cpu_load_pct": 18.5,
     "gpu_load_pct": 28.0,
     "temp_c": 46.5,
-    "fps": 30.0,
+    "fps": null,
     "link_status": "Wi-Fi 5GHz (Online)"
   }
   ```
@@ -69,4 +70,5 @@ Garantizar la visibilidad en tiempo real del estado operativo, salud de hardware
 ## 3. Criterios de Aceptación
 1. **Persistencia**: El agente debe correr como servicio systemd (`sari-jetson.service`) habilitado en el arranque.
 2. **Tolerancia a Fallos**: Si el broker MQTT o el servidor SARI Cerebro se reinicia, el script debe intentar reconectar indefinidamente en bucle `sleep(3)` sin terminar el proceso.
-3. **Métricas Reales**: Lectura de temperatura desde `/sys/devices/virtual/thermal/` y GPU desde devfreq/Tegra con fallbacks seguros.
+3. **Métricas Reales**: Lectura de temperatura desde `/sys/devices/virtual/thermal/` y GPU desde devfreq/Tegra. Una métrica que no se puede leer se envía como `null`, nunca como un valor inventado.
+4. **Implementación**: `sari_eyes/telemetry.py` (entrada `jetson_telemetry.py`), servicio `deploy/sari-jetson.service`.

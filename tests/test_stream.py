@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 
-from conftest import ROOT, base_env
+from conftest import ROOT, base_env, project_code
 from sari_eyes import stream
 from sari_eyes.config import ConfigError, load_settings
 
@@ -102,7 +102,6 @@ def test_short_stream_token_is_rejected():
 # --- static guards ---
 
 def test_single_server_implementation_without_wildcard_cors():
-    code = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.py")
-                     if ".venv" not in p.parts and "tests" not in p.parts)
+    code = project_code()
     assert "Access-Control-Allow-Origin" not in code
     assert "flask" not in code.lower()

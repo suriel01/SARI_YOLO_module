@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT, base_env
+from conftest import ROOT, base_env, project_python_files
 from sari_eyes.config import ConfigError, load_settings, redact_url
 
 SECRET_NAMES = ["CAMERA_PASS", "MQTT_PASSWORD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SARI_NODE_KEY", "EYES_STREAM_TOKEN"]
@@ -68,7 +68,7 @@ SECRETISH = re.compile(r"PASS|TOKEN|SECRET|KEY|CHAT_ID")
 
 
 def _python_files():
-    return [p for p in ROOT.rglob("*.py") if ".venv" not in p.parts and "tests" not in p.parts]
+    return project_python_files()
 
 
 def test_no_python_reads_a_secret_env_var_with_a_default():
@@ -109,3 +109,40 @@ def test_env_is_gitignored_and_example_has_placeholders_only():
         key, value = line.split("=", 1)
         if SECRETISH.search(key):
             assert value.startswith("<") and value.endswith(">"), key
+
+
+def test_deploy_env_template_has_placeholders_only():
+    for line in (ROOT / "deploy" / "jetson.env.example").read_text(encoding="utf-8").splitlines():
+        if "=" not in line or line.lstrip().startswith("#"):
+            continue
+        key, value = line.split("=", 1)
+        if SECRETISH.search(key):
+            assert value.startswith("<") and value.endswith(">"), key
+
+
+def test_systemd_unit_reads_secrets_from_environment_file_only():
+    unit = (ROOT / "deploy" / "sari-jetson.service").read_text(encoding="utf-8")
+    assert "EnvironmentFile=/etc/sari/jetson.env" in unit
+    for line in unit.splitlines():
+        if line.startswith("Environment="):
+            assert not SECRETISH.search(line), line
+
+
+def test_dockerfile_pins_base_and_runs_unprivileged():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    base = next(l for l in dockerfile.splitlines() if l.startswith("FROM "))
+    assert "latest" not in base and "@sha256:" in base
+    assert any(l.strip() == "USER sari" for l in dockerfile.splitlines())
+    for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            assert "==" in line, line
+
+
+def test_no_credential_shaped_strings_in_project_text_files():
+    telegram_token = re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{30,}\b")
+    files = [p for p in ROOT.rglob("*") if p.is_file() and p.suffix in {".md", ".py", ".yml", ".yaml", ".example", ".service", ".txt", ""}
+             and not ({".venv", ".git", "tests", "model_cache", "alert_queue", ".atl"} & set(p.relative_to(ROOT).parts))
+             and p.name != ".env"]
+    offenders = [str(p.relative_to(ROOT)) for p in files
+                 if telegram_token.search(p.read_text(encoding="utf-8", errors="ignore"))]
+    assert offenders == []

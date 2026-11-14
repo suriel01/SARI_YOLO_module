@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -82,3 +84,53 @@ def publish_alert(settings: Settings, payload: dict, publish: Callable = mqtt_pu
         return False
     logger.info("MQTT alert published on %s", Topics(settings.node_id).alerts)
     return True
+
+
+class CommandListener:
+    """Subscribes to this node's command topics and forwards raw payloads to ``handler``.
+
+    Reconnects forever; a failing handler is logged and never stops the listener.
+    """
+
+    def __init__(self, settings: Settings, handler: Callable[[str, bytes], object],
+                 reconnect_delay_s: float = 5.0) -> None:
+        self.settings = settings
+        self.handler = handler
+        self.topics = Topics(settings.node_id)
+        self.reconnect_delay_s = reconnect_delay_s
+
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
+        if rc == 0 or str(rc) == "Success":
+            client.subscribe(self.topics.ptz, 0)
+            client.subscribe(self.topics.tracking, 1)
+            client.subscribe(self.topics.config, 1)
+            logger.info("Command listener connected; subscribed to %s/{ptz,tracking,config}",
+                        f"sari/nodes/{self.settings.node_id}")
+        else:
+            logger.warning("Command listener connection refused (rc=%s)", rc)
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            self.handler(msg.topic, msg.payload)
+        except Exception:
+            logger.exception("Command handler failed for %s", msg.topic)
+
+    def _connect_once(self):
+        client = make_client(self.settings, "ctrl")
+        client.on_connect = self._on_connect
+        client.on_message = self._on_message
+        client.connect(self.settings.mqtt_host, self.settings.mqtt_port, keepalive=30)
+        return client
+
+    def _run(self) -> None:
+        while True:
+            try:
+                self._connect_once().loop_forever()
+            except Exception as exc:
+                logger.warning("Command listener disconnected (%s); retrying in %ss",
+                               type(exc).__name__, self.reconnect_delay_s)
+            time.sleep(self.reconnect_delay_s)
+
+    def start(self) -> "CommandListener":
+        threading.Thread(target=self._run, daemon=True, name="MQTTCommandThread").start()
+        return self

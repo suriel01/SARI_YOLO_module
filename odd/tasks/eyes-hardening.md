@@ -19,12 +19,12 @@ The split (S6) is done progressively: each task moves the code it touches into t
 
 | ID | Specs | Route | Status | Commit |
 |----|-------|-------|--------|--------|
-| T1 | S1 | inline | pending | |
-| T2 | S2 | inline | pending | |
-| T3 | S3 | inline | pending | |
-| T4 | S4 | inline | pending | |
-| T5 | S5 | inline | pending | |
-| T6 | S6 | inline | pending | |
+| T1 | S1 | inline | done | `cb86121` (+ review fixes `0281d87`, `48997d1`) |
+| T2 | S2 | inline | done | `7c2498b` |
+| T3 | S3 | inline | done | `7f9e1d6` |
+| T4 | S4 | inline | done | `ed6825a` (+ review fix `0a8bc4b`) |
+| T5 | S5 | inline | done | `d499f46` (+ brain-alignment fix `2b50c7a`) |
+| T6 | S6 | inline | done | see `git log` (feat(structure) commit) |
 
 Route evidence: one session, sequential dependent units on shared files (`camara_ptz.py`, package wiring), so no Writer trigger applies.
 
@@ -46,3 +46,7 @@ Route evidence: one session, sequential dependent units on shared files (`camara
   Done = all tasks committed on the branch with tests passing (`pytest -q`), a short report of owner actions (rotate Telegram token, Hikvision admin password, MQTT password; create MQTT user `Jetson-PTZ_1` in the brain broker; set `SARI_NODE_KEY` from the brain's `SARI_NODE_KEYS`; purge history or make repo private), and what could not be verified without the Jetson hardware.
 
 - **L2 (2026-11-13, exploration):** brain verified on branch `chore/claude-odd-reorg`: `require_node` maps `X-SARI-Node-Key` to a node id (401 otherwise); `/api/telemetry/node` rejects a payload `node_id` that differs from the key's node (403); broker ACL grants `pattern write sari/nodes/%u/{telemetry,status,alerts}` and `pattern read sari/nodes/%u/{ptz,tracking,config}`; no WebSocket server exists in the brain; the Telegram bot fetches `<stream_url with /mjpeg→/snapshot>` from the node, so the brain's `stream_url` must carry `?token=` once S3 lands (owner action). The current code also logs the RTSP URL including the camera password (fixed under S1).
+
+- **L3 (2026-11-13, RDD reviews per commit, consent granted by the owner each time):** T1 review: one CRITICAL (telegram CLI output changed) → corrected in `0281d87`; the targeted validator rejected that correction (logging.basicConfig duplicated CLI lines) → lifecycle **escalated**, fixed anyway as ordinary work in `48997d1` with exact-stdout tests. T2 approved (advisories: no redirects for keyed POST → done in T4; REST→MQTT fallback untested → covered by dispatcher tests). T3 approved (advisories: bind failure must not crash the node, logging unconfigured → done in T6). T4: one CRITICAL (frozen-frame false positives on still scenes) → corrected in `0a8bc4b`, validator approved. T5 approved (advisories: non-CommandError parse failures, narrowed except, wiring untested, guard scope → done in `2b50c7a`/T6).
+- **L4 (2026-11-13, discoveries):** spec/004 contained the live Telegram token and chat id (tracked Markdown) → removed, guard test added. The brain publishes `confidence_threshold` on `/config` and the UI sends PTZ `action: "drag"` with unbounded/null deltas → validator accepts both (`2b50c7a`; deltas clamped to ±100, rejected beyond ±1000). The brain sounds the siren only for `event_type == "intrusion"`, so tamper alerts never trigger it; queued intrusion alerts delivered late still would (brain follow-up: ignore stale `timestamp`). `2b50c7a` assessed medium/under_budget (pending in the open slice).
+- **L5 (2026-11-13, T6 decisions):** `camara_ptz.py` is a thin entry point over `sari_eyes.app.EyesNode`; shared state in `NodeState`/`FrameBuffer`; base image pinned to `ultralytics/ultralytics:8.4.204-jetson-jetpack6@sha256:e42e5e41…` (oldest of the recent tags, ~1 week); container user uid 10001 in group `video`, `cap_drop: ALL`, `no-new-privileges`; telemetry agent reports unknown metrics as null and uses a single `CEREBRO_HTTP_TELEMETRY_URL`. Not verifiable here: GPU access as non-root, TensorRT export, real camera/ISAPI, broker ACL with the per-node user.

@@ -6,7 +6,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from conftest import ROOT, base_env
+from conftest import ROOT, base_env, project_code
 from sari_eyes import alerts
 from sari_eyes.config import ConfigError, load_settings
 from sari_eyes.transport import mqtt as mqtt_transport
@@ -140,8 +140,7 @@ def test_client_factory_sets_credentials_and_tls(tmp_path):
 # --- static guards ---
 
 def _code():
-    return "\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.py")
-                     if ".venv" not in p.parts and "tests" not in p.parts)
+    return project_code()
 
 
 def test_no_hardcoded_brain_fallback_hosts_or_port_8000():
