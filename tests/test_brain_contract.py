@@ -152,3 +152,9 @@ def test_no_hardcoded_brain_fallback_hosts_or_port_8000():
 
 def test_no_publish_to_legacy_shared_alert_topic():
     assert not re.search(r"""["']sari/alerts["']""", _code())
+
+
+def test_rest_alert_never_follows_redirects_with_the_node_key(settings):
+    with mock.patch("sari_eyes.transport.rest.requests.post", return_value=mock.Mock(status_code=307)) as post:
+        assert rest.post_alert(settings, {"x": 1}) is False
+    assert post.call_args.kwargs["allow_redirects"] is False

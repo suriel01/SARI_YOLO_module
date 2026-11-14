@@ -16,6 +16,7 @@ services:
       - ./telegram_alert.py:/app/telegram_alert.py
       - ./sari_eyes:/app/sari_eyes
       - ./model_cache:/app/model_cache # Para cachear yolo26n.engine y no recompilar
+      - ./alert_queue:/app/alert_queue # persistent undelivered alerts (survives restarts)
     deploy:
       resources:
         reservations:

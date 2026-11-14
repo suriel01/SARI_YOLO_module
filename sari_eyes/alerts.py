@@ -51,3 +51,17 @@ def build_alert_payload(
         "timestamp": time.time(),
         "snapshot": snapshot_b64,
     }
+
+
+def build_tamper_payload(*, node_id: str, camera_id: str, reason: str, snapshot_b64: Optional[str]) -> dict:
+    """Camera tamper (RTSP loss, black, frozen or occluded frame) reported as its own event type."""
+    return build_alert_payload(
+        node_id=node_id,
+        camera_id=camera_id,
+        reason=reason,
+        duration=0.0,
+        confidence=1.0,
+        snapshot_b64=snapshot_b64,
+        event_type="tamper",
+        message=f"Camera tamper detected on {camera_id}: {reason}",
+    )

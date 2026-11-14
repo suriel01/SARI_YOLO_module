@@ -20,6 +20,7 @@ def post_alert(settings: Settings, payload: dict, timeout: float = 3.0) -> bool:
             json=payload,
             headers={NODE_KEY_HEADER: settings.node_key},
             timeout=timeout,
+            allow_redirects=False,  # never replay the node key to a redirect target
         )
     except Exception as exc:
         logger.warning("Brain REST alert failed: %s", type(exc).__name__)

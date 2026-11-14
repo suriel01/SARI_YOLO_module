@@ -9,3 +9,4 @@ logs2.txt
 .env
 .env.*
 !.env.example
+alert_queue/

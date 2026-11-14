@@ -54,7 +54,9 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
-from sari_eyes.alerts import build_alert_payload, encode_snapshot
+from sari_eyes.alert_queue import AlertDispatcher, DiskAlertQueue
+from sari_eyes.alerts import build_alert_payload, build_tamper_payload, encode_snapshot
+from sari_eyes.tamper import TamperDetector
 from sari_eyes.config import load_settings, redact_url
 from sari_eyes.stream import FrameBuffer, start_stream_server
 from sari_eyes.transport import mqtt as mqtt_transport
@@ -103,6 +105,18 @@ estado_global = {
 
 telemetria_queue = queue.Queue(maxsize=10)
 
+# Cola persistente de alertas (reintentos con backoff + fallback Telegram)
+DISPATCHER = AlertDispatcher(
+    DiskAlertQueue(os.environ.get("ALERT_QUEUE_DIR", "alert_queue")),
+    deliver=[
+        lambda p: rest_transport.post_alert(SETTINGS, p),
+        lambda p: mqtt_transport.publish_alert(SETTINGS, p),
+    ],
+    telegram=lambda text: enviar_alerta_telegram(text, token=SETTINGS.telegram_token, chat_id=SETTINGS.telegram_chat_id),
+    node_id=NODE_ID,
+)
+TAMPER = TamperDetector()
+
 # Buffer para transmisión de video MJPEG (thread-safe)
 FRAME_BUFFER = FrameBuffer()
 
@@ -135,7 +149,7 @@ def crear_frame_espera(mensaje="CONECTANDO A CAMARA HIKVISION..."):
 # AUXILIAR: NOTIFICACIÓN REST AL SARI BRAIN AGENT
 # =====================================================================
 def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=None):
-    """Sends one intrusion alert (single snapshot) to the brain: REST first, MQTT if REST fails."""
+    """Queues one intrusion alert (single snapshot) for persistent delivery to the brain."""
     payload = build_alert_payload(
         node_id=NODE_ID,
         camera_id=camera_id,
@@ -144,14 +158,18 @@ def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=No
         confidence=confidence,
         snapshot_b64=encode_snapshot(frame) if frame is not None else None,
     )
+    DISPATCHER.submit(payload)
 
-    def _post():
-        if rest_transport.post_alert(SETTINGS, payload):
-            return
-        if not mqtt_transport.publish_alert(SETTINGS, payload):
-            print("[ALERT ERROR] Brain unreachable over REST and MQTT; alert not delivered")
 
-    threading.Thread(target=_post, daemon=True).start()
+def notificar_tamper(camera_id, reason, frame=None):
+    """Queues a camera tamper alert (RTSP loss, black, frozen or occluded frame)."""
+    print(f"[TAMPER] {reason} en {camera_id}")
+    DISPATCHER.submit(build_tamper_payload(
+        node_id=NODE_ID,
+        camera_id=camera_id,
+        reason=reason,
+        snapshot_b64=encode_snapshot(frame) if frame is not None else None,
+    ))
 
 
 # =====================================================================
@@ -215,6 +233,10 @@ class ThreadedVideoCapture:
             except Exception as e:
                 print(f"[VIDEO EXCEPCIÓN] {e}")
                 time.sleep(0.5)
+
+    def last_frame_at(self):
+        with self.lock:
+            return self.last_frame_time
 
     def read(self):
         with self.lock:
@@ -600,6 +622,9 @@ def main():
         placeholder=lambda: crear_frame_espera("INICIALIZANDO STREAM EN VIVO..."),
     )
 
+    # 3b. Entrega persistente de alertas
+    DISPATCHER.start()
+
     # 4. Cargar Modelo YOLO y Captura de Video (RTSP/TCP)
     model = cargar_modelo_yolo()
     capture = ThreadedVideoCapture(rtsp_url=RTSP_URL)
@@ -623,8 +648,15 @@ def main():
         while True:
             ret, frame = capture.read()
             if not ret or frame is None:
+                motivo = TAMPER.check_stream(time.time(), capture.last_frame_at())
+                if motivo:
+                    notificar_tamper("PTZ_1", motivo)
                 time.sleep(0.005)
                 continue
+
+            motivo = TAMPER.analyze(frame, time.time())
+            if motivo:
+                notificar_tamper("PTZ_1", motivo, frame=frame)
 
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
