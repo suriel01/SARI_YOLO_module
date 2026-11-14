@@ -7,8 +7,8 @@ import pytest
 from conftest import ROOT, base_env
 from sari_eyes.config import ConfigError, load_settings, redact_url
 
-SECRET_NAMES = ["CAMERA_PASS", "MQTT_PASSWORD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"]
-REQUIRED_NAMES = SECRET_NAMES + ["JETSON_NODE_ID", "CAMERA_IP", "CAMERA_USER", "MQTT_BROKER_HOST", "MQTT_USER"]
+SECRET_NAMES = ["CAMERA_PASS", "MQTT_PASSWORD", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SARI_NODE_KEY"]
+REQUIRED_NAMES = SECRET_NAMES + ["JETSON_NODE_ID", "CAMERA_IP", "CAMERA_USER", "MQTT_BROKER_HOST", "MQTT_USER", "CEREBRO_HTTP_EVENT_URL"]
 
 
 def test_valid_env_loads():
@@ -58,7 +58,7 @@ def test_rtsp_url_contains_credentials_but_redacted_form_does_not():
 
 def test_settings_repr_hides_secrets():
     text = repr(load_settings(base_env()))
-    for secret in ("test-camera-pass", "test-mqtt-pass", "test-telegram-token"):
+    for secret in ("test-camera-pass", "test-mqtt-pass", "test-telegram-token", "test-node-key"):
         assert secret not in text
 
 

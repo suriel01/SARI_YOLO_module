@@ -18,6 +18,8 @@ def base_env(**overrides):
         "MQTT_PASSWORD": "test-mqtt-pass",
         "TELEGRAM_BOT_TOKEN": "test-telegram-token",
         "TELEGRAM_CHAT_ID": "12345",
+        "SARI_NODE_KEY": "test-node-key",
+        "CEREBRO_HTTP_EVENT_URL": "http://10.0.0.2:7000/api/alerts/event",
     }
     env.update(overrides)
     return {k: v for k, v in env.items() if v is not None}

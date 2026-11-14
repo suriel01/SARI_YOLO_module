@@ -6,7 +6,7 @@ seguimiento PTZ Hikvision ultra-fluido (25Hz) y Servidor de Video en Vivo MJPEG 
 
 Comunica telemetría y alertas al Módulo Cerebro (SARI Brain Agent) mediante:
   1. WebSockets: ws://<CEREBRO_HOST>:8765
-  2. REST API: http://<CEREBRO_HOST>:8000/api/alerts/event
+  2. REST API: CEREBRO_HTTP_EVENT_URL (POST /api/alerts/event on the brain, port 7000, X-SARI-Node-Key)
   3. Servidor de Video Web MJPEG: http://0.0.0.0:8080/video_feed (o /mjpeg)
 """
 
@@ -59,7 +59,10 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
+from sari_eyes.alerts import build_alert_payload, encode_snapshot
 from sari_eyes.config import load_settings, redact_url
+from sari_eyes.transport import mqtt as mqtt_transport
+from sari_eyes.transport import rest as rest_transport
 
 SETTINGS = load_settings()  # fails closed with ConfigError when a required variable is missing
 CAMERA_IP = SETTINGS.camera_ip
@@ -68,10 +71,9 @@ PASSWORD = SETTINGS.camera_password
 
 CEREBRO_HOST = os.environ.get("CEREBRO_HOST", "")
 CEREBRO_PORT_WS = os.environ.get("CEREBRO_PORT_WS", "8765")
-CEREBRO_PORT_HTTP = os.environ.get("CEREBRO_PORT_HTTP", "8000")
 
 CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_WS}")
-CEREBRO_HTTP_EVENT_URL = os.environ.get("CEREBRO_HTTP_EVENT_URL", f"http://{CEREBRO_HOST}:{CEREBRO_PORT_HTTP}/api/alerts/event")
+CEREBRO_HTTP_EVENT_URL = SETTINGS.cerebro_http_event_url
 
 NODE_ID = SETTINGS.node_id
 MQTT_BROKER_HOST = SETTINGS.mqtt_host
@@ -85,9 +87,10 @@ STREAM_PORT = SETTINGS.stream_port
 RTSP_URL = SETTINGS.rtsp_url
 
 # Tópicos de control MQTT
-TOPIC_PTZ = f"sari/nodes/{NODE_ID}/ptz"
-TOPIC_TRACKING = f"sari/nodes/{NODE_ID}/tracking"
-TOPIC_CONFIG = f"sari/nodes/{NODE_ID}/config"
+TOPICS = mqtt_transport.Topics(NODE_ID)
+TOPIC_PTZ = TOPICS.ptz
+TOPIC_TRACKING = TOPICS.tracking
+TOPIC_CONFIG = TOPICS.config
 
 # Variable de estado de seguimiento (Control Central SARI Cerebro)
 human_tracking_active = True
@@ -255,89 +258,21 @@ def iniciar_servidor_stream_video():
 # AUXILIAR: NOTIFICACIÓN REST AL SARI BRAIN AGENT
 # =====================================================================
 def notificar_evento_rest(camera_id, reason, duration, confidence=0.85, frame=None):
-    """Envía un evento de intrusión estructurado con captura de evidencia en base64 al backend del Módulo Cerebro."""
-    image_base64 = None
-    if frame is not None:
-        try:
-            h, w = frame.shape[:2]
-            snap_img = cv2.resize(frame, (1280, 720)) if w > 1280 else frame
-            ok, buf = cv2.imencode('.jpg', snap_img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            if ok:
-                image_base64 = base64.b64encode(buf.tobytes()).decode('utf-8')
-        except Exception as e:
-            print(f"[SNAPSHOT ERROR] No se pudo codificar imagen para alerta: {e}")
+    """Sends one intrusion alert (single snapshot) to the brain: REST first, MQTT if REST fails."""
+    payload = build_alert_payload(
+        node_id=NODE_ID,
+        camera_id=camera_id,
+        reason=reason,
+        duration=duration,
+        confidence=confidence,
+        snapshot_b64=encode_snapshot(frame) if frame is not None else None,
+    )
 
-    snapshot_data_url = f"data:image/jpeg;base64,{image_base64}" if image_base64 else None
-
-    payload = {
-        "module_name": f"Jetson-{camera_id}",
-        "camara_id": camera_id,
-        "event_type": "intrusion",
-        "severity": "high",
-        "event": f"Intrusión ({reason}) - {round(duration, 1)}s",
-        "message": f"Intrusión detectada ({reason}) durante {round(duration, 1)}s con {int(confidence*100)}% de confianza",
-        "confidence": confidence,
-        "duration": duration,
-        "auto_siren": True,
-        "image_base64": image_base64,
-        "snapshot": snapshot_data_url,
-        "image_url": snapshot_data_url,
-        "metadata": {
-            "confidence": confidence,
-            "duration": duration,
-            "image_base64": image_base64,
-            "snapshot": snapshot_data_url
-        }
-    }
-    
     def _post():
-        candidate_urls = [
-            CEREBRO_HTTP_EVENT_URL,
-            "http://192.168.55.100:8000/api/alerts/event",
-            "http://192.168.1.71:8000/api/alerts/event"
-        ]
-        seen = set()
-        unique_urls = [u for u in candidate_urls if not (u in seen or seen.add(u))]
-
-        enviado = False
-        for url in unique_urls:
-            try:
-                resp = requests.post(url, json=payload, timeout=2.0)
-                if resp.status_code in [200, 201, 202]:
-                    print(f"[REST ALERT OK] Evidencia con captura enviada exitosamente a SARI Brain ({url}). Status: {resp.status_code}")
-                    enviado = True
-                    break
-                else:
-                    print(f"[REST ALERT WARNING] SARI Brain ({url}) respondió con HTTP {resp.status_code}")
-            except Exception:
-                continue
-
-        if not enviado:
-            print(f"[REST ALERT ERROR] No se pudo conectar con el backend de SARI Brain en ninguna de las URLs probadas: {unique_urls}")
-
-        # Publicación al broker MQTT del Cerebro (Topic: sari/alerts, QoS=1)
-        if HAS_MQTT_PUBLISH:
-            try:
-                alert_payload_mqtt = {
-                    "node_id": NODE_ID,
-                    "event_type": "intrusion",
-                    "severity": "high",
-                    "message": "Intrusión verificada en perímetro",
-                    "confidence": round(confidence, 2),
-                    "snapshot": image_base64 or ""
-                }
-                mqtt_publish.single(
-                    topic="sari/alerts",
-                    payload=json.dumps(alert_payload_mqtt),
-                    qos=1,
-                    hostname=MQTT_BROKER_HOST,
-                    port=MQTT_BROKER_PORT,
-                    auth={"username": MQTT_USER, "password": MQTT_PASS},
-                    keepalive=10
-                )
-                print(f"[MQTT ALERT OK] Alerta de intrusión con snapshot base64 publicada en {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT} topic sari/alerts")
-            except Exception as e_mqtt:
-                print(f"[MQTT ALERT WARNING] No se pudo publicar alerta en MQTT: {e_mqtt}")
+        if rest_transport.post_alert(SETTINGS, payload):
+            return
+        if not mqtt_transport.publish_alert(SETTINGS, payload):
+            print("[ALERT ERROR] Brain unreachable over REST and MQTT; alert not delivered")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -745,11 +680,7 @@ def iniciar_hilo_mqtt_control():
     def _mqtt_loop():
         while True:
             try:
-                try:
-                    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"jetson_vision_ctrl_{NODE_ID}")
-                except Exception:
-                    client = mqtt.Client(client_id=f"jetson_vision_ctrl_{NODE_ID}")
-                client.username_pw_set(MQTT_USER, MQTT_PASS)
+                client = mqtt_transport.make_client(SETTINGS, "ctrl")
                 client.on_connect = on_connect
                 client.on_message = on_message
                 client.connect(MQTT_BROKER_HOST, MQTT_BROKER_PORT, keepalive=30)

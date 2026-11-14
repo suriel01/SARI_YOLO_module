@@ -19,6 +19,7 @@ class ConfigError(RuntimeError):
 LEGACY_NAMES = {
     "MQTT_PASS": "MQTT_PASSWORD",
     "MQTT_PORT": "MQTT_BROKER_PORT",
+    "CEREBRO_PORT_HTTP": "CEREBRO_HTTP_EVENT_URL",
 }
 
 
@@ -88,6 +89,9 @@ class Settings:
     mqtt_password: str = field(repr=False)
     telegram_token: str = field(repr=False)
     telegram_chat_id: str = field(repr=False)
+    node_key: str = field(repr=False)
+    cerebro_http_event_url: str
+    mqtt_tls_ca: Optional[str] = None
     node_ip: Optional[str] = None
     confidence_threshold: float = 0.70
     stream_port: int = 8080
@@ -100,17 +104,31 @@ class Settings:
 def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     env = os.environ if env is None else env
     _reject_legacy_names(env)
+
+    node_id = require(env, "JETSON_NODE_ID")
+    mqtt_user = require(env, "MQTT_USER")
+    if mqtt_user != node_id:
+        # The broker ACL only lets user <id> publish on sari/nodes/<id>/..., so any other user is denied.
+        raise ConfigError("MQTT_USER must equal JETSON_NODE_ID (broker ACL pattern sari/nodes/%u/...)")
+
+    tls_ca = optional(env, "MQTT_TLS_CA")
+    if tls_ca is not None and not os.path.isfile(tls_ca):
+        raise ConfigError("MQTT_TLS_CA must point to an existing CA certificate file")
+
     return Settings(
-        node_id=require(env, "JETSON_NODE_ID"),
+        node_id=node_id,
         camera_ip=require(env, "CAMERA_IP"),
         camera_user=require(env, "CAMERA_USER"),
         camera_password=require(env, "CAMERA_PASS"),
         mqtt_host=require(env, "MQTT_BROKER_HOST"),
-        mqtt_port=as_int(env, "MQTT_BROKER_PORT", 1883),
-        mqtt_user=require(env, "MQTT_USER"),
+        mqtt_port=as_int(env, "MQTT_BROKER_PORT", 8883 if tls_ca else 1883),
+        mqtt_user=mqtt_user,
         mqtt_password=require(env, "MQTT_PASSWORD"),
         telegram_token=require(env, "TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=require(env, "TELEGRAM_CHAT_ID"),
+        node_key=require(env, "SARI_NODE_KEY"),
+        cerebro_http_event_url=require(env, "CEREBRO_HTTP_EVENT_URL"),
+        mqtt_tls_ca=tls_ca,
         node_ip=optional(env, "JETSON_NODE_IP"),
         confidence_threshold=as_float(env, "CONFIDENCE_THRESHOLD", 0.70),
         stream_port=as_int(env, "STREAM_PORT", 8080),
