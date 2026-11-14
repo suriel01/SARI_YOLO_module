@@ -17,8 +17,7 @@ Garantizar la visibilidad en tiempo real del estado operativo, salud de hardware
 
 - **Broker**: `MQTT_BROKER_HOST:MQTT_BROKER_PORT` (1883, u 8883 con `MQTT_TLS_CA`). Usuario MQTT = `JETSON_NODE_ID`, contraseña `MQTT_PASSWORD`; ambos en `/etc/sari/jetson.env` (ver `deploy/`).
 - **Fallback HTTP**: si MQTT cae, `POST CEREBRO_HTTP_TELEMETRY_URL` (`/api/telemetry/node`, puerto 7000) con cabecera `X-SARI-Node-Key: $SARI_NODE_KEY`.
-- **Autenticación**: Usuario `sari_operator`, Clave `sari_secure_password_2026`
-- **Client ID**: `jetson_{NODE_ID}`
+- **Client ID**: `{NODE_ID}-telemetry`
 
 ### 2.1 Mensaje Last Will and Testament (LWT)
 - **Tópico**: `sari/nodes/{NODE_ID}/status`

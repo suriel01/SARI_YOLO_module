@@ -146,3 +146,14 @@ def test_no_credential_shaped_strings_in_project_text_files():
     offenders = [str(p.relative_to(ROOT)) for p in files
                  if telegram_token.search(p.read_text(encoding="utf-8", errors="ignore"))]
     assert offenders == []
+
+
+def test_docs_never_write_credential_values():
+    # e.g. "Clave `s3cr3t...`" or "Valor actual del sistema: `123:ABC...`"; placeholders and VAR names are fine
+    pattern = re.compile(r"(?i)(clave|contraseña|password|token|valor actual)[^`\n]{0,30}[:=]?\s*`(?!<)(?![A-Z_]+`)[^`\s./]{8,}`")
+    offenders = []
+    for path in list(ROOT.glob("*.md")) + list((ROOT / "spec").glob("*.md")) + list((ROOT / "docs").glob("*.md")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.name}:{n}")
+    assert offenders == []

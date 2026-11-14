@@ -82,3 +82,15 @@ def test_publish_falls_back_to_http_when_mqtt_is_down():
     with mock.patch("sari_eyes.telemetry.send_http", return_value=True) as http:
         assert agent.publish({"node_id": "Jetson-PTZ_1"}) == "http"
     http.assert_called_once()
+
+
+def test_mqtt_reconnect_is_left_to_paho_single_loop():
+    s = telemetry.load_telemetry_settings(ENV)
+    client = mock.Mock()
+    with mock.patch("sari_eyes.telemetry.make_mqtt_client", return_value=client):
+        agent = telemetry.TelemetryAgent(s)
+    agent.start_mqtt()
+    agent.start_mqtt()
+    client.connect_async.assert_called_once_with("10.0.0.2", 1883, keepalive=15)
+    client.loop_start.assert_called_once()
+    client.connect.assert_not_called()

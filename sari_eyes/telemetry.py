@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -142,6 +141,7 @@ class TelemetryAgent:
         self.settings = settings
         self.topics = Topics(settings.node_id)
         self.connected = False
+        self._mqtt_started = False
         self.client = make_mqtt_client(settings)
         self.client.will_set(self.topics.status, json.dumps(
             {"node_id": settings.node_id, "status": "offline", "reason": "connection_lost"}), qos=1, retain=True)
@@ -163,15 +163,14 @@ class TelemetryAgent:
         self.connected = False
         logger.warning("Telemetry MQTT disconnected")
 
-    def _connect_loop(self) -> None:
-        while True:
-            if not self.connected:
-                try:
-                    self.client.connect(self.settings.mqtt_host, self.settings.mqtt_port, keepalive=15)
-                    self.client.loop_start()
-                except Exception as exc:
-                    logger.debug("Telemetry MQTT reconnect failed: %s", type(exc).__name__)
-            time.sleep(5.0)
+    def start_mqtt(self) -> None:
+        """Connect once in the background; paho's network loop owns reconnection."""
+        if self._mqtt_started:
+            return
+        self._mqtt_started = True
+        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
+        self.client.connect_async(self.settings.mqtt_host, self.settings.mqtt_port, keepalive=15)
+        self.client.loop_start()
 
     def publish(self, payload: dict) -> Optional[str]:
         """Returns the transport used ("mqtt" or "http") or None when both failed."""
@@ -184,7 +183,7 @@ class TelemetryAgent:
         return "http" if send_http(self.settings, payload) else None
 
     def run_forever(self) -> None:
-        threading.Thread(target=self._connect_loop, daemon=True, name="TelemetryMQTT").start()
+        self.start_mqtt()
         while True:
             s = self.settings
             self.publish(collect_metrics(s.node_id, s.name, s.ip))

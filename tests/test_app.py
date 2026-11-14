@@ -137,3 +137,20 @@ def test_process_uses_live_confidence_threshold(monkeypatch, tmp_path):
     node.state.set_confidence(0.42)
     node.process(frame, Spy([]))
     assert seen == [0.42]
+
+
+def test_intrusion_reason_keeps_the_original_identifier(monkeypatch, tmp_path):
+    node, frame, person = make_node(monkeypatch, tmp_path)
+    for second in range(6):
+        frame[0, 0, 0] = second
+        node.process(frame.copy(), FakeDetector([person]), now=float(second))
+    [payload] = [c.args[0] for c in node.dispatcher.submit.call_args_list if c.args[0]["event_type"] == "intrusion"]
+    assert payload["reason"] == "persona_mas_de_5s"
+
+
+def test_safe_process_survives_a_failing_frame(monkeypatch, tmp_path, caplog):
+    node, frame, person = make_node(monkeypatch, tmp_path)
+    monkeypatch.setattr(node, "process", mock.Mock(side_effect=RuntimeError("encode")))
+    with caplog.at_level(logging.ERROR):
+        assert node.safe_process(frame, None) == 0
+    assert "frame processing failed" in caplog.text.lower()

@@ -109,7 +109,7 @@ class EyesNode:
     def _alert_intrusion(self, duration: float, confidence: float, frame) -> None:
         logger.warning("Intrusion: person present for %.1fs; queueing alert", duration)
         self.dispatcher.submit(build_alert_payload(
-            node_id=self.settings.node_id, camera_id=CAMERA_ID, reason="person_over_5s",
+            node_id=self.settings.node_id, camera_id=CAMERA_ID, reason="persona_mas_de_5s",
             duration=duration, confidence=confidence, snapshot_b64=encode_snapshot(frame)))
 
     def _alert_tamper(self, reason: str, frame=None) -> None:
@@ -176,6 +176,14 @@ class EyesNode:
             self.frames.set(jpeg.tobytes())
         return len(detections)
 
+    def safe_process(self, frame, detector: Optional[PersonDetector]) -> int:
+        """One bad frame (encode, annotation, alert build) must never stop the node."""
+        try:
+            return self.process(frame, detector)
+        except Exception:
+            logger.exception("Frame processing failed; continuing with the next frame")
+            return 0
+
     def run(self) -> None:
         self.frames.set(waiting_frame("CONNECTING TO CAMERA..."))
         mqtt_transport.CommandListener(
@@ -199,7 +207,7 @@ class EyesNode:
                         self._alert_tamper(reason)
                     time.sleep(0.005)
                     continue
-                last_count = self.process(frame, detector)
+                last_count = self.safe_process(frame, detector)
                 frames += 1
                 elapsed = time.time() - started
                 if elapsed >= 5.0:
