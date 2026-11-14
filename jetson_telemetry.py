@@ -5,19 +5,24 @@ import paho.mqtt.client as mqtt
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("jetson_agent")
 
+def _require(name):
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        raise SystemExit(f"Missing required environment variable {name}")
+    return value
+
+
 # CONFIGURACIÓN DEL NODO
-NODE_ID = os.environ.get("JETSON_NODE_ID", "Jetson-PTZ_1")
-NODE_NAME = os.environ.get("JETSON_NODE_NAME", "Jetson Orin Nano (PTZ 1)")
-NODE_IP = os.environ.get("JETSON_NODE_IP", "192.168.1.73") # IP de esta Jetson
+NODE_ID = _require("JETSON_NODE_ID")
+NODE_NAME = os.environ.get("JETSON_NODE_NAME") or NODE_ID
+NODE_IP = os.environ.get("JETSON_NODE_IP", "")
 
 # CEREBRO SARI
-MQTT_HOST = os.environ.get("MQTT_BROKER_HOST", "192.168.1.71") # IP de tu PC/Servidor SARI
-MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
-MQTT_USER = os.environ.get("MQTT_USER", "sari_operator")
-MQTT_PASS = os.environ.get("MQTT_PASS", "sari_secure_password_2026")
+MQTT_HOST = _require("MQTT_BROKER_HOST")
+MQTT_PORT = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
+MQTT_USER = _require("MQTT_USER")
+MQTT_PASS = _require("MQTT_PASSWORD")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8990032616:AAFT732S-Q46GAaNXRs3bEs0-JidOZE7tjQ")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "7170575800")
 
 # Compatibilidad con Paho MQTT v1 y v2
 try:

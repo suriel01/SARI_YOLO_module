@@ -6,3 +6,6 @@ model_cache/
 *.pt
 logs.txt
 logs2.txt
+.env
+.env.*
+!.env.example

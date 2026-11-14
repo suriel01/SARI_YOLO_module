@@ -28,6 +28,7 @@ RUN pip3 install --no-cache-dir \
 # Copiar el código fuente
 COPY camara_ptz.py .
 COPY telegram_alert.py .
+COPY sari_eyes ./sari_eyes
 
 # Puerto expuesto para servidor de video MJPEG
 EXPOSE 8080

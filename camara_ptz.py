@@ -36,7 +36,7 @@ except ImportError:
     HAS_MQTT_PUBLISH = False
 
 # Importar módulo de alertas de Telegram (fallback / directo)
-from telegram_alert import enviar_alerta_telegram
+from sari_eyes.telegram import send_message as enviar_alerta_telegram
 
 try:
     import torch
@@ -59,27 +59,30 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
-CAMERA_IP = os.environ.get("CAMERA_IP", "192.168.1.200")
-USERNAME = os.environ.get("CAMERA_USER", "admin")
-PASSWORD = os.environ.get("CAMERA_PASS", "Asenso117925")
+from sari_eyes.config import load_settings, redact_url
 
-CEREBRO_HOST = os.environ.get("CEREBRO_HOST", "192.168.1.100")
+SETTINGS = load_settings()  # fails closed with ConfigError when a required variable is missing
+CAMERA_IP = SETTINGS.camera_ip
+USERNAME = SETTINGS.camera_user
+PASSWORD = SETTINGS.camera_password
+
+CEREBRO_HOST = os.environ.get("CEREBRO_HOST", "")
 CEREBRO_PORT_WS = os.environ.get("CEREBRO_PORT_WS", "8765")
 CEREBRO_PORT_HTTP = os.environ.get("CEREBRO_PORT_HTTP", "8000")
 
 CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_WS}")
 CEREBRO_HTTP_EVENT_URL = os.environ.get("CEREBRO_HTTP_EVENT_URL", f"http://{CEREBRO_HOST}:{CEREBRO_PORT_HTTP}/api/alerts/event")
 
-NODE_ID = os.environ.get("JETSON_NODE_ID", "Jetson-PTZ_1")
-MQTT_BROKER_HOST = os.environ.get("MQTT_BROKER_HOST", "192.168.1.71")
-MQTT_BROKER_PORT = int(os.environ.get("MQTT_BROKER_PORT", 1883))
-MQTT_USER = os.environ.get("MQTT_USER", "sari_operator")
-MQTT_PASS = os.environ.get("MQTT_PASSWORD", "sari_secure_password_2026")
-NODE_IP = os.environ.get("JETSON_NODE_IP", "192.168.1.77")
+NODE_ID = SETTINGS.node_id
+MQTT_BROKER_HOST = SETTINGS.mqtt_host
+MQTT_BROKER_PORT = SETTINGS.mqtt_port
+MQTT_USER = SETTINGS.mqtt_user
+MQTT_PASS = SETTINGS.mqtt_password
+NODE_IP = SETTINGS.node_ip or ""
 
-CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.70"))
-STREAM_PORT = int(os.environ.get("STREAM_PORT", "8080"))
-RTSP_URL = f"rtsp://{USERNAME}:{PASSWORD}@{CAMERA_IP}:554/Streaming/Channels/101"
+CONFIDENCE_THRESHOLD = SETTINGS.confidence_threshold
+STREAM_PORT = SETTINGS.stream_port
+RTSP_URL = SETTINGS.rtsp_url
 
 # Tópicos de control MQTT
 TOPIC_PTZ = f"sari/nodes/{NODE_ID}/ptz"
@@ -360,7 +363,7 @@ class ThreadedVideoCapture:
                 self.cap.release()
             except Exception:
                 pass
-        print(f"[VIDEO] Abriendo stream Hikvision RTSP: {self.rtsp_url}...")
+        print(f"[VIDEO] Abriendo stream Hikvision RTSP: {redact_url(self.rtsp_url)}...")
         self.cap = cv2.VideoCapture(self.rtsp_url)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
