@@ -1,127 +1,79 @@
-# 👁️ SARI YOLO Module — Módulo Ojos
+# SARI Eyes module (Jetson vision node)
 
-**Módulo Ojos** es el nodo autónomo de visión por computadora y control PTZ del ecosistema **SARI (Sistema Autónomo de Respuesta a Intrusiones)**. Ejecutándose en dispositivos edge **NVIDIA Jetson Orin**, realiza captura de video RTSP multihilo de ultra-baja latencia, inferencia de objetos acelerada por GPU (**YOLO26n en TensorRT FP16**), seguimiento de precisión Hikvision PTZ a 25Hz y **servidor de video web en vivo MJPEG (Puerto 8080)**.
-
----
-
-## 🏗️ Arquitectura del Sistema
-
-El Módulo Ojos opera de forma independiente y en tiempo real en la Jetson, sirviendo la transmisión de video adaptada para navegadores web y enviando eventos de evidencia al **[SARI Brain Agent](https://github.com/suriel01/SARI_brain_agent_module.git)** (Módulo Cerebro).
+Vision node of SARI (Sistema Autónomo de Respuesta a Intrusiones). It runs on an NVIDIA Jetson
+Orin, detects people with YOLO26n (TensorRT FP16), keeps them centred with a Hikvision PTZ camera,
+serves an authenticated MJPEG stream and reports intrusions and camera tampering to the
+**SARI Brain** ([SARI_brain_agent_module](https://github.com/suriel01/SARI_brain_agent_module)).
+The brain, not this node, decides whether the siren sounds.
 
 ```mermaid
-graph TD
-    subgraph "Cámara PTZ IP"
-        CAM["🎥 Cámara Hikvision PTZ<br/>(RTSP Stream 1080p)"]
-        ISAPI["⚙️ API ISAPI PTZ<br/>(Control Continuo)"]
-    end
-
-    subgraph "NVIDIA Jetson Orin (Módulo Ojos — SARI_YOLO_module)"
-        Reader["🚀 ThreadedVideoCapture<br/>(RTSP Buffer=1 Anti-Lag)"]
-        Engine["⚡ Motor TensorRT FP16<br/>(YOLO26n CUDA Inferencia)"]
-        PTZCtrl["🎯 Control Proporcional PTZ<br/>(Refresco a 25Hz / Deadzone 0.08)"]
-        MJPEGServer["📺 Servidor HTTP MJPEG Stream<br/>(http://0.0.0.0:8080/video_feed)"]
-        WSClient["📡 Client WebSockets<br/>(Heartbeat + Telemetría)"]
-        RESTClient["🚨 HTTP REST Alert Client<br/>(Notificación Evidencia)"]
-    end
-
-    subgraph "Laptop / Servidor (Módulo Cerebro — SARI_brain_agent_module)"
-        BrainWS["🌐 WebSocket Server<br/>(:8765)"]
-        BrainREST["🧠 FastAPI REST Backend<br/>(:8000/api/alerts/event)"]
-        SOC["📺 Consola Táctica SOC<br/>(React + Web Audio Sirena)"]
-    end
-
-    CAM -->|RTSP H.264/H.265| Reader
-    Reader -->|Frame Numpy| Engine
-    Engine -->|Frame Anotado YOLO| MJPEGServer
-    Engine -->|Coordenadas Bounding Box| PTZCtrl
-    PTZCtrl -->|HTTP XML Commands| ISAPI
-    PTZCtrl -->|Payload Telemetría| WSClient
-    Engine -->|Intrusión > 5s| RESTClient
-
-    MJPEGServer -->|Stream MJPEG en Vivo| SOC
-    WSClient -->|ws://CEREBRO_HOST:8765| BrainWS
-    RESTClient -->|POST /api/alerts/event| BrainREST
+flowchart LR
+    CAM[Hikvision PTZ] -- RTSP/TCP --> CAP[capture]
+    CAP --> DET[detector YOLO26n] --> APP[app loop]
+    APP -- ISAPI 25 Hz --> CAM
+    APP --> TAMP[tamper]
+    APP --> Q[(alert_queue on disk)]
+    Q -- "POST /api/alerts/event + X-SARI-Node-Key" --> BRAIN[SARI Brain :7000]
+    Q -- "sari/nodes/&lt;id&gt;/alerts (QoS 1, fallback)" --> MQTT[(Brain broker)]
+    Q -- "brain unreachable 30 s" --> TG[Telegram]
+    MQTT -- "sari/nodes/&lt;id&gt;/ptz|tracking|config" --> APP
+    APP --> STREAM["MJPEG :8080 (token)"]
 ```
 
----
+## Layout
 
-## ⚡ Características Principales
+| Path | Purpose |
+|------|---------|
+| `camara_ptz.py` | Container entry point (`sari_eyes.app.main`) |
+| `jetson_telemetry.py` | Host telemetry agent entry point (`sari_eyes.telemetry.main`) |
+| `telegram_alert.py` | CLI to send a test Telegram message |
+| `sari_eyes/config.py` | Environment loading; fails closed on missing variables |
+| `sari_eyes/capture.py` | Threaded RTSP capture with reconnect watchdog |
+| `sari_eyes/detector.py` | YOLO loading (TensorRT engine cache) and person detection |
+| `sari_eyes/ptz.py` | Hikvision ISAPI control, tracking speeds, manual pulses |
+| `sari_eyes/intrusion.py` | "person present ≥ 5 s" alert timing |
+| `sari_eyes/tamper.py` | RTSP loss, black, occluded and frozen frame detection |
+| `sari_eyes/alerts.py`, `alert_queue.py` | Alert payloads; persistent queue, retry/backoff, Telegram fallback |
+| `sari_eyes/commands.py` | Validation of MQTT commands |
+| `sari_eyes/stream.py` | Token-protected MJPEG/snapshot server |
+| `sari_eyes/transport/` | REST (node key) and MQTT (per-node topics, TLS) transports |
+| `deploy/` | systemd unit and env template for the telemetry agent |
+| `spec/` | Functional specs (Spanish) |
 
-1. **Transmisión de Video en Vivo Compatible con Navegadores (MJPEG HTTP)**:
-   - **URL Stream MJPEG**: `http://<IP_JETSON>:8080/video_feed`
-   - Superposición en tiempo real de cuadros delimitadores YOLO26n (verde normal, rojo en intrusión) y retícula central de seguimiento PTZ.
-   - Compatible con cualquier navegador web (Chrome, Safari, Firefox), aplicaciones móviles y la consola táctica de **SARI Brain Agent**.
+## Configuration
 
-2. **Aceleración TensorRT FP16 en GPU NVIDIA**:
-   - Compilación automática del modelo `yolo26n.pt` a `yolo26n.engine` optimizado para los núcleos CUDA de Jetson Orin.
-   - Métricas de rendimiento impresas en consola cada 5 segundos (ej. `35.4 FPS | Latencia Inferencia: 14.2ms`).
+Copy `.env.example` to `.env` (never committed) and fill every `<placeholder>`; the node refuses to
+start when one is missing. Key rules:
 
-3. **Seguimiento PTZ Ultra-Fluido (25Hz)**:
-   - Cooldown de comandos de `0.04s` (25Hz) para seguimiento continuo sin congelamientos.
-   - Algoritmo de velocidad proporcional suave con aceleración exponencial.
-   - Zona muerta (*Deadzone*) de `0.08`.
+- `MQTT_USER` must equal `JETSON_NODE_ID` (broker ACL `sari/nodes/%u/...`), e.g. `Jetson-PTZ_1`.
+- `SARI_NODE_KEY` is this node's entry in the brain's `SARI_NODE_KEYS` (`node_id:key`).
+- `CEREBRO_HTTP_EVENT_URL` points at the brain API, port 7000: `http://<brain>:7000/api/alerts/event`.
+- `EYES_STREAM_TOKEN` (≥ 16 chars) protects `/mjpeg` and `/snapshot` (header `X-SARI-Stream-Token`
+  or `?token=`). Register the brain's `stream_url` as `http://<jetson>:8080/mjpeg?token=<token>`.
+- Optional `MQTT_TLS_CA=/path/ca.crt` enables TLS (default port 8883).
+- Old names `MQTT_PASS`, `MQTT_PORT` and `CEREBRO_PORT_HTTP` are rejected with a rename hint.
 
-4. **Detección de Alta Confianza (≥ 70%)**:
-   - Filtrado estricto de personas (`CONFIDENCE_THRESHOLD=0.70`).
+## Run (Jetson)
 
-5. **Notificación Dual al Módulo Cerebro**:
-   - **WebSockets (`ws://CEREBRO_HOST:8765`)**: Telemetría y estado PTZ continuo.
-   - **REST API (`POST http://CEREBRO_HOST:8000/api/alerts/event`)**: Notificación automática al detectar intrusiones continuas de ≥ 5 segundos.
-
----
-
-## 📁 Estructura del Repositorio
-
-```text
-SARI_YOLO_module/
-├── camara_ptz.py         # Inferencia YOLO TensorRT, seguimiento PTZ y Servidor MJPEG (8080)
-├── telegram_alert.py     # Canal directo de respaldo para alertas por Telegram
-├── docker-compose.yml    # Despliegue Docker con soporte GPU NVIDIA y mapeo de puerto 8080
-├── Dockerfile            # Construcción de la imagen Docker con OpenCV, PyTorch, CUDA y Flask
-├── model_cache/          # Persistencia del motor compilado yolo26n.engine
-├── docs/                 # Documentación y guías de integración
-├── spec/                 # Especificaciones del módulo (SDD)
-├── AGENTS.md             # Convenciones y estándares del Módulo Ojos
-└── README.md             # Documentación principal
-```
-
----
-
-## 🛠️ Variables de Entorno
-
-| Variable | Valor por Defecto | Descripción |
-|---|---|---|
-| `STREAM_PORT` | `8080` | Puerto HTTP donde se sirve la transmisión de video MJPEG |
-| `CAMERA_IP` | `192.168.1.200` | Dirección IP de la cámara Hikvision PTZ |
-| `CAMERA_USER` | `admin` | Usuario Digest de la cámara |
-| `CAMERA_PASS` | `Asenso117925` | Contraseña de la cámara |
-| `CEREBRO_HOST` | `192.168.1.79` | IP del servidor donde ejecuta `SARI_brain_agent_module` |
-| `CEREBRO_PORT_WS` | `8765` | Puerto WebSocket del Módulo Cerebro |
-| `CEREBRO_PORT_HTTP` | `8000` | Puerto HTTP REST del Módulo Cerebro |
-| `CONFIDENCE_THRESHOLD` | `0.70` | Umbral de confianza mínimo de detección (70%) |
-
----
-
-## 🚀 Inicio Rápido
-
-### 1. Iniciar el Microservicio en Jetson
 ```bash
+sudo mkdir -p model_cache alert_queue && sudo chown -R 10001:10001 model_cache alert_queue
 docker compose up --build -d
-```
-
-### 2. Probar la Transmisión de Video en Vivo
-Abre tu navegador e ingresa a:
-- **Vista Web Interactiva**: `http://<IP_JETSON>:8080/`
-- **Flujo de Video Directo**: `http://<IP_JETSON>:8080/video_feed`
-- **Captura Instantánea**: `http://<IP_JETSON>:8080/snapshot`
-
-### 3. Monitorear Logs y FPS
-```bash
 docker compose logs -f
+docker compose down
 ```
 
----
+The container runs as the unprivileged `sari` user (uid 10001) with all capabilities dropped. The
+base image is pinned by tag and digest; bump it deliberately (a new TensorRT invalidates the cached
+`model_cache/yolo26n.engine`).
 
-## 🔗 Repositorios Relacionados
+Telemetry agent (host): install `deploy/sari-jetson.service`, create `/etc/sari/jetson.env` from
+`deploy/jetson.env.example` (root:root, 0600) and `sudo systemctl enable --now sari-jetson`.
 
-- **[SARI Brain Agent Module](https://github.com/suriel01/SARI_brain_agent_module.git)**: Módulo Cerebro (Backend FastAPI, PostgreSQL, Consola SOC Táctica React y Agente Autónomo).
+## Tests
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest -q
+```
+
+Tests mock the camera, YOLO, the broker and HTTP; they do not need a Jetson.

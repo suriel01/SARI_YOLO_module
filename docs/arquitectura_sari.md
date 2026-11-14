@@ -70,7 +70,7 @@ graph LR
 | :--- | :--- | :--- | :--- | :--- |
 | **Telemetría** | MQTT (QoS 0) | `sari/nodes/{NODE_ID}/telemetry` | Ojos ➔ Cerebro | Métricas de CPU, GPU, RAM, Temp cada 3s |
 | **Estado LWT** | MQTT (QoS 1, Retain) | `sari/nodes/{NODE_ID}/status` | Ojos ➔ Cerebro | Mensajes de conexión (`online`) y desconexión (`offline`) |
-| **Alertas** | MQTT (QoS 1) | `sari/alerts` | Ojos ➔ Cerebro | Notificación de intrusión con snapshot Base64 |
+| **Alertas** | REST (`X-SARI-Node-Key`) / MQTT (QoS 1) | `POST /api/alerts/event` / `sari/nodes/<id>/alerts` | Ojos ➔ Cerebro | Intrusión o sabotaje con un snapshot Base64 |
 | **Config / Control**| MQTT (QoS 1) | `sari/nodes/{NODE_ID}/config` | Cerebro ➔ Ojos | Comandos de control (PTZ lock, sensibilidad) |
 | **Snapshots** | HTTP REST | `GET http://<JETSON_IP>:8080/snapshot` | Cerebro ➔ Ojos | Captura fotográfica instantánea en JPEG |
 | **Video Feed** | HTTP MJPEG | `GET http://<JETSON_IP>:8080/video_feed` | Cerebro/SOC ➔ Ojos | Streaming de video con bounding boxes |

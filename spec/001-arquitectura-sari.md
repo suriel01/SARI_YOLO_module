@@ -32,9 +32,17 @@ Definir de manera formal y vinculante la separación de responsabilidades entre 
         │                                                                │
         ├─► sari/nodes/{id}/status (LWT & Birth) ────────────────────────┤
         ├─► sari/nodes/{id}/telemetry (Cada 3s) ─────────────────────────┤
-        ├─► sari/alerts (Eventos con Base64 Snapshot) ───────────────────┤
-        ├─◄ sari/nodes/{id}/config (Comandos de tracking y ajustes) ─────┤
-        └─◄ HTTP GET :8080/snapshot (Extracción fotográfica bajo demanda)┤
+        ├─► POST :7000/api/alerts/event (X-SARI-Node-Key) ───────────────┤
+        ├─► sari/nodes/{id}/alerts (fallback MQTT, QoS 1) ───────────────┤
+        ├─◄ sari/nodes/{id}/ptz|tracking|config (comandos validados) ────┤
+        └─◄ HTTP GET :8080/snapshot?token= (EYES_STREAM_TOKEN) ──────────┤
+```
+
+- El usuario MQTT de cada nodo es su `node_id` (ACL del broker `sari/nodes/%u/...`).
+- El nodo nunca decide la sirena: solo reporta evidencia (un snapshot por alerta, sin `auto_siren`).
+- No existe canal WebSocket entre Ojos y Cerebro.
+
+```
 ```
 
 ---

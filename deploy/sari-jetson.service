@@ -1,0 +1,32 @@
+[Unit]
+Description=SARI Jetson telemetry agent (MQTT status/telemetry + keyed HTTP fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jetson
+# Checkout of this repository on the Jetson (the agent imports the sari_eyes package).
+WorkingDirectory=/home/jetson/SARI_YOLO_module
+# All configuration, including MQTT_PASSWORD and SARI_NODE_KEY, comes from a root-owned 0600
+# file (template: deploy/jetson.env.example). Never put secrets in this unit.
+EnvironmentFile=/etc/sari/jetson.env
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/usr/bin/python3 /home/jetson/SARI_YOLO_module/jetson_telemetry.py
+
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+# Hardening: the agent only reads /sys and talks to the network.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

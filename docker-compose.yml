@@ -5,32 +5,20 @@ services:
     restart: unless-stopped
     runtime: nvidia # Habilita el runtime de NVIDIA para acceso a la GPU
     ports:
-      - "8080:8080" # Servidor de video en vivo MJPEG para el navegador y SARI Brain Agent
+      - "8080:8080" # Authenticated MJPEG/snapshot server (EYES_STREAM_TOKEN)
+    env_file:
+      - .env # local only, never committed; template in .env.example
     environment:
-      - CEREBRO_HOST=${CEREBRO_HOST:-192.168.1.71} # IP activa del servidor SARI Brain Agent (PC/Laptop)
-      - CEREBRO_PORT_WS=8765
-      - CEREBRO_PORT_HTTP=8000
-      - CEREBRO_URL=ws://${CEREBRO_HOST:-192.168.1.71}:8765
-      - CEREBRO_HTTP_EVENT_URL=http://${CEREBRO_HOST:-192.168.1.71}:8000/api/alerts/event
-      - CONFIDENCE_THRESHOLD=0.70
-      - STREAM_PORT=8080
-      - CAMERA_IP=192.168.1.200
-      - CAMERA_USER=admin
-      - CAMERA_PASS=Asenso117925
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-8990032616:AAFT732S-Q46GAaNXRs3bEs0-JidOZE7tjQ}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-7170575800}
-      - MQTT_BROKER_HOST=192.168.1.71
-      - MQTT_BROKER_PORT=1883
-      - MQTT_USER=sari_operator
-      - MQTT_PASSWORD=sari_secure_password_2026
-      - JETSON_NODE_ID=Jetson-PTZ_1
-      - JETSON_NODE_IP=192.168.1.77
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    # Runs as the unprivileged `sari` user (uid 10001): `sudo chown -R 10001:10001 model_cache alert_queue`
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     volumes:
-      - ./camara_ptz.py:/app/camara_ptz.py
-      - ./telegram_alert.py:/app/telegram_alert.py
       - ./model_cache:/app/model_cache # Para cachear yolo26n.engine y no recompilar
+      - ./alert_queue:/app/alert_queue # persistent undelivered alerts (survives restarts)
     deploy:
       resources:
         reservations:

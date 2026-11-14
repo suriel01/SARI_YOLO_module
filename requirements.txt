@@ -1,0 +1,5 @@
+# Runtime dependencies installed on top of the pinned Ultralytics Jetson image
+# (which already ships ultralytics, torch, TensorRT, numpy and OpenCV with CUDA).
+paho-mqtt==2.2.0
+requests==2.34.2
+psutil==7.2.2
