@@ -47,4 +47,16 @@ def test_cli_without_arguments_prints_spanish_usage_and_exits_0():
 def test_cli_send_failure_is_printed_and_still_exits_0():
     result = _run_cli("hola")
     assert result.returncode == 0
-    assert "[TELEGRAM]" in result.stdout + result.stderr
+    assert result.stdout == "[TELEGRAM] Error al enviar alerta.\n"
+
+
+def test_cli_success_prints_exactly_one_line(monkeypatch, capsys):
+    import runpy
+    import sys
+    from unittest import mock
+
+    from conftest import ROOT
+    monkeypatch.setattr(sys, "argv", ["telegram_alert.py", "hola"])
+    with mock.patch("sari_eyes.telegram.send_message", return_value=True):
+        runpy.run_path(str(ROOT / "telegram_alert.py"), run_name="__main__")
+    assert capsys.readouterr().out == "[TELEGRAM] Alerta enviada con éxito.\n"
