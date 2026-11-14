@@ -5,7 +5,7 @@ Captura de video RTSP de alta velocidad (RTSP/TCP), detección YOLO acelerada (T
 seguimiento PTZ Hikvision ultra-fluido (25Hz) y Servidor de Video en Vivo MJPEG (Puerto 8080).
 
 Comunica telemetría y alertas al Módulo Cerebro (SARI Brain Agent) mediante:
-  1. WebSockets: ws://<CEREBRO_HOST>:8765
+  1. MQTT: sari/nodes/<JETSON_NODE_ID>/alerts (fallback) and validated commands on .../ptz|tracking|config
   2. REST API: CEREBRO_HTTP_EVENT_URL (POST /api/alerts/event on the brain, port 7000, X-SARI-Node-Key)
   3. Servidor de Video Web MJPEG autenticado: http://<STREAM_BIND>:<STREAM_PORT>/mjpeg?token=<EYES_STREAM_TOKEN>
 """
@@ -14,13 +14,10 @@ import os
 import time
 import threading
 import json
-import asyncio
-import queue
 import base64
 import cv2
 import numpy as np
 import requests
-import websockets
 from requests.auth import HTTPDigestAuth
 
 # Forzar transporte TCP en FFMPEG/OpenCV para evitar artefactos, desincronización y pantallas negras en Hikvision
@@ -54,6 +51,7 @@ except ImportError:
 # =====================================================================
 # CONFIGURACIÓN POR VARIABLES DE ENTORNO
 # =====================================================================
+from sari_eyes import commands
 from sari_eyes.alert_queue import AlertDispatcher, DiskAlertQueue
 from sari_eyes.alerts import build_alert_payload, build_tamper_payload, encode_snapshot
 from sari_eyes.tamper import TamperDetector
@@ -67,10 +65,6 @@ CAMERA_IP = SETTINGS.camera_ip
 USERNAME = SETTINGS.camera_user
 PASSWORD = SETTINGS.camera_password
 
-CEREBRO_HOST = os.environ.get("CEREBRO_HOST", "")
-CEREBRO_PORT_WS = os.environ.get("CEREBRO_PORT_WS", "8765")
-
-CEREBRO_URL = os.environ.get("CEREBRO_URL", f"ws://{CEREBRO_HOST}:{CEREBRO_PORT_WS}")
 CEREBRO_HTTP_EVENT_URL = SETTINGS.cerebro_http_event_url
 
 NODE_ID = SETTINGS.node_id
@@ -103,7 +97,6 @@ estado_global = {
     "tilt_actual": 0
 }
 
-telemetria_queue = queue.Queue(maxsize=10)
 
 # Cola persistente de alertas (reintentos con backoff + fallback Telegram)
 DISPATCHER = AlertDispatcher(
@@ -306,75 +299,42 @@ class HikvisionPTZ:
         return self.mover(0, 0, zoom=0, force=True)
 
 
-def ejecutar_comando_ptz_manual(action, pan_delta=0, tilt_delta=0, zoom_delta=0):
-    """Ejecuta comandos de movimiento manual PTZ recibidos de SARI Cerebro."""
+PTZ_PULSE_SPEED = 50
+
+
+def ejecutar_comando_ptz_manual(cmd):
+    """Ejecuta un PtzCommand ya validado (sari_eyes.commands.parse_ptz)."""
     global _manual_timer
     if ptz_controlador is None:
         print("[PTZ MANUAL] Controlador PTZ aún no inicializado.")
         return
 
-    action_lower = str(action).lower() if action else ""
-
-    if action_lower == "stop":
-        with _manual_lock:
-            if _manual_timer and _manual_timer.is_alive():
-                _manual_timer.cancel()
-        ptz_controlador.detener()
-        return
-
-    pan_speed = 0
-    tilt_speed = 0
-    zoom_speed = 0
-    is_pulse = False
-
-    # 1. Comandos directos D-Pad
-    if action_lower == "up":
-        tilt_speed = 50
-        is_pulse = True
-    elif action_lower == "down":
-        tilt_speed = -50
-        is_pulse = True
-    elif action_lower == "left":
-        pan_speed = -50
-        is_pulse = True
-    elif action_lower == "right":
-        pan_speed = 50
-        is_pulse = True
-    elif action_lower == "center":
-        ptz_controlador.detener()
-        return
-    elif action_lower == "zoom_in":
-        zoom_speed = 50
-        is_pulse = True
-    elif action_lower == "zoom_out":
-        zoom_speed = -50
-        is_pulse = True
-    else:
-        # 2. Comandos Click & Drag / Joystick por deltas
-        if pan_delta != 0:
-            pan_speed = max(min(int(pan_delta), 100), -100)
-            is_pulse = True
-        if tilt_delta != 0:
-            tilt_speed = max(min(int(tilt_delta), 100), -100)
-            is_pulse = True
-        if zoom_delta != 0:
-            zoom_speed = max(min(int(zoom_delta), 100), -100)
-            is_pulse = True
-
     with _manual_lock:
         if _manual_timer and _manual_timer.is_alive():
             _manual_timer.cancel()
 
-    ptz_controlador.mover(pan_speed, tilt_speed, zoom_speed, force=True)
+    if cmd.action in ("stop", "center"):
+        ptz_controlador.detener()
+        return
 
-    # Si es un pulso manual, auto-detener tras 0.35s de inactividad
-    if is_pulse:
-        def _auto_stop():
-            time.sleep(0.35)
-            if ptz_controlador is not None:
-                ptz_controlador.detener()
+    pan, tilt, zoom = cmd.pan, cmd.tilt, cmd.zoom
+    if cmd.action is not None:
+        pan, tilt, zoom = {
+            "up": (0, PTZ_PULSE_SPEED, 0),
+            "down": (0, -PTZ_PULSE_SPEED, 0),
+            "left": (-PTZ_PULSE_SPEED, 0, 0),
+            "right": (PTZ_PULSE_SPEED, 0, 0),
+            "zoom_in": (0, 0, PTZ_PULSE_SPEED),
+            "zoom_out": (0, 0, -PTZ_PULSE_SPEED),
+        }[cmd.action]
+
+    ptz_controlador.mover(pan, tilt, zoom, force=True)
+
+    # Pulso manual: auto-detener tras 0.35s de inactividad
+    if pan or tilt or zoom:
         with _manual_lock:
-            _manual_timer = threading.Thread(target=_auto_stop, daemon=True)
+            _manual_timer = threading.Timer(0.35, ptz_controlador.detener)
+            _manual_timer.daemon = True
             _manual_timer.start()
 
 
@@ -428,92 +388,6 @@ def cargar_modelo_yolo():
 
 
 # =====================================================================
-# COMUNICACIÓN WEBSOCKET ASÍNCRONA CON EL CEREBRO
-# =====================================================================
-async def websocket_loop():
-    """Bucle asíncrono para enviar telemetría y recibir comandos (con reconexión exponencial)."""
-    backoff = 1.0
-    max_backoff = 60.0
-    
-    while True:
-        try:
-            print(f"[WEBSOCKET] Conectando al Módulo Cerebro en {CEREBRO_URL}...")
-            async with websockets.connect(CEREBRO_URL) as ws:
-                print("[WEBSOCKET] ✅ Conectado exitosamente al Módulo Cerebro.")
-                backoff = 1.0
-                
-                heartbeat_task = asyncio.create_task(enviar_heartbeat(ws))
-                telemetry_task = asyncio.create_task(procesar_telemetria(ws))
-                receive_task = asyncio.create_task(recibir_comandos(ws))
-                
-                done, pending = await asyncio.wait(
-                    [heartbeat_task, telemetry_task, receive_task],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                for task in pending:
-                    task.cancel()
-                    
-        except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError, Exception) as e:
-            print(f"[WEBSOCKET] Reintentando conexión con Cerebro en {backoff}s... ({e})")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-
-async def enviar_heartbeat(ws):
-    """Envía un ping de vida cada 2 segundos."""
-    while True:
-        payload = {
-            "tipo": "heartbeat",
-            "camara_id": "PTZ_1",
-            "timestamp": time.time()
-        }
-        await ws.send(json.dumps(payload))
-        await asyncio.sleep(2)
-
-async def procesar_telemetria(ws):
-    """Extrae datos de la cola y los envía al Cerebro."""
-    while True:
-        try:
-            payload = telemetria_queue.get_nowait()
-            await ws.send(json.dumps(payload))
-            telemetria_queue.task_done()
-        except queue.Empty:
-            await asyncio.sleep(0.01)
-
-async def recibir_comandos(ws):
-    """Escucha comandos entrantes desde el Cerebro."""
-    async for mensaje in ws:
-        try:
-            datos = json.loads(mensaje)
-            comando = datos.get("comando")
-            
-            if comando == "set_tracking":
-                global human_tracking_active
-                nuevo_estado = datos.get("estado", True)
-                human_tracking_active = bool(nuevo_estado)
-                estado_global["auto_tracking"] = human_tracking_active
-                print(f"[COMANDO] Auto-tracking cambiado a: {nuevo_estado}")
-                if not human_tracking_active and ptz_controlador is not None:
-                    ptz_controlador.detener()
-                
-            elif comando == "telegram_alert":
-                texto = datos.get("mensaje", "Alerta desde el Módulo Ojo")
-                print("[COMANDO] Alerta de Telegram solicitada.")
-                threading.Thread(target=enviar_alerta_telegram, args=(texto,), daemon=True).start()
-                
-            else:
-                print(f"[WEBSOCKET] Comando no reconocido: {comando}")
-                
-        except json.JSONDecodeError:
-            print("[WEBSOCKET] Mensaje inválido recibido del Cerebro.")
-
-def iniciar_hilo_websocket():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(websocket_loop())
-
-
-# =====================================================================
 # HILO DE ESCUCHA MQTT: CONTROL MANUAL PTZ, TRACKING Y CONFIGURACIÓN
 # =====================================================================
 def iniciar_hilo_mqtt_control():
@@ -537,44 +411,31 @@ def iniciar_hilo_mqtt_control():
     def on_message(client, userdata, msg):
         global human_tracking_active, CONFIDENCE_THRESHOLD
         try:
-            payload = json.loads(msg.payload.decode("utf-8"))
-
-            # 1. Comando de Seguimiento de Humanos
+            payload = commands.decode(msg.payload)
             if msg.topic == TOPIC_TRACKING:
-                human_tracking_active = bool(payload.get("enabled", True))
-                estado_global["auto_tracking"] = human_tracking_active
-                print(f"[TRACKING] Seguimiento de humanos {'ACTIVADO' if human_tracking_active else 'PAUSADO'}")
-                if not human_tracking_active and ptz_controlador is not None:
-                    ptz_controlador.detener()
-
-            # 2. Comandos de Movimiento Manual PTZ (Click & Drag / D-Pad / Zoom)
+                cambios = {"tracking": commands.parse_tracking(payload)}
             elif msg.topic == TOPIC_PTZ:
-                action = payload.get("action")
-                pan_delta = payload.get("pan_delta", 0)
-                tilt_delta = payload.get("tilt_delta", 0)
-                zoom_delta = payload.get("zoom_delta", 0)
-                print(f"[PTZ] Moviendo cámara: {action} (Pan: {pan_delta}, Tilt: {tilt_delta}, Zoom: {zoom_delta})")
-                ejecutar_comando_ptz_manual(action, pan_delta, tilt_delta, zoom_delta)
-
-            # 3. Configuración dinámica (sari/nodes/{NODE_ID}/config)
+                cmd = commands.parse_ptz(payload)
+                print(f"[PTZ] Comando manual: {cmd}")
+                ejecutar_comando_ptz_manual(cmd)
+                return
             elif msg.topic == TOPIC_CONFIG:
-                print(f"[MQTT CONFIG] Mensaje de configuración recibido en {msg.topic}: {payload}")
-                if "yolo_confidence" in payload:
-                    nuevo_umbral = float(payload["yolo_confidence"])
-                    if 0.1 <= nuevo_umbral <= 0.99:
-                        CONFIDENCE_THRESHOLD = nuevo_umbral
-                        print(f"[MQTT CONFIG OK] Umbral de confianza actualizado a {round(CONFIDENCE_THRESHOLD * 100, 1)}%")
+                cambios = commands.parse_config(payload)
+            else:
+                return
+        except commands.CommandError as e:
+            print(f"[MQTT CONTROL] Comando rechazado en {msg.topic}: {e}")
+            return
 
-                if "active" in payload or "ptz_tracking" in payload:
-                    val = payload.get("ptz_tracking", payload.get("active", True))
-                    human_tracking_active = bool(val)
-                    estado_global["auto_tracking"] = human_tracking_active
-                    print(f"[MQTT CONFIG OK] Auto-tracking actualizado a: {human_tracking_active}")
-                    if not human_tracking_active and ptz_controlador is not None:
-                        ptz_controlador.detener()
-
-        except Exception as e:
-            print(f"[ERROR] Procesando mensaje MQTT: {e}")
+        if "yolo_confidence" in cambios:
+            CONFIDENCE_THRESHOLD = cambios["yolo_confidence"]
+            print(f"[MQTT CONFIG OK] Umbral de confianza actualizado a {round(CONFIDENCE_THRESHOLD * 100, 1)}%")
+        if "tracking" in cambios:
+            human_tracking_active = cambios["tracking"]
+            estado_global["auto_tracking"] = human_tracking_active
+            print(f"[TRACKING] Seguimiento de humanos {'ACTIVADO' if human_tracking_active else 'PAUSADO'}")
+            if not human_tracking_active and ptz_controlador is not None:
+                ptz_controlador.detener()
 
     def _mqtt_loop():
         while True:
@@ -608,9 +469,7 @@ def main():
     ptz = HikvisionPTZ(ip=CAMERA_IP, username=USERNAME, password=PASSWORD)
     ptz_controlador = ptz
 
-    # 2. Iniciar Hilos de Comunicación (WebSockets y Control MQTT PTZ / Tracking)
-    ws_thread = threading.Thread(target=iniciar_hilo_websocket, daemon=True, name="WebSocketThread")
-    ws_thread.start()
+    # 2. Iniciar escucha de comandos MQTT validados (PTZ / Tracking / Config)
     iniciar_hilo_mqtt_control()
 
     # 3. Iniciar Servidor de Video en Vivo MJPEG (Puerto 8080)
@@ -767,22 +626,11 @@ def main():
                             tiempo_transcurrido = time.time() - tiempo_inicio_deteccion
                             if tiempo_transcurrido >= 5.0 and (time.time() - ultimo_envio_alerta > cooldown_alerta):
                                 dur_round = round(tiempo_transcurrido, 2)
-                                payload_alerta = {
-                                    "tipo": "alerta",
-                                    "camara_id": "PTZ_1",
-                                    "razon": "persona_mas_de_5s",
-                                    "tiempo_detectado": dur_round,
-                                    "timestamp": time.time()
-                                }
-                                try:
-                                    telemetria_queue.put_nowait(payload_alerta)
-                                    print(f"[ALERTA PTZ] Persona detectada durante {dur_round}s. Enviando telemetría y evento REST al Cerebro...")
-                                    notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2], frame=annotated_frame)
-                                    ultimo_envio_alerta = time.time()
-                                    tiempo_inicio_deteccion = None
-                                    ultimo_visto = None
-                                except queue.Full:
-                                    pass
+                                print(f"[ALERTA PTZ] Persona detectada durante {dur_round}s. Encolando alerta para el Cerebro...")
+                                notificar_evento_rest("PTZ_1", "persona_mas_de_5s", dur_round, confidence=best_coords[2], frame=annotated_frame)
+                                ultimo_envio_alerta = time.time()
+                                tiempo_inicio_deteccion = None
+                                ultimo_visto = None
                     else:
                         # Ventana de paciencia de 2 segundos antes de resetear el timer
                         if ultimo_visto is not None and (time.time() - ultimo_visto > 2.0):
@@ -804,22 +652,6 @@ def main():
                     FRAME_BUFFER.set(jpeg_buf.tobytes())
             except Exception as e:
                 print(f"[ENCODE ERROR] {e}")
-
-            # Enviar telemetría periódica a la cola de WebSockets
-            payload = {
-                "tipo": "telemetria",
-                "camara_id": "PTZ_1",
-                "timestamp": time.time(),
-                "detecciones": detecciones_payload,
-                "estado_ptz": {
-                    "pan": estado_global["pan_actual"],
-                    "tilt": estado_global["tilt_actual"]
-                }
-            }
-            try:
-                telemetria_queue.put_nowait(payload)
-            except queue.Full:
-                pass
 
             # MÉTRICAS DE FLUIDEZ (REPORTAR FPS Y LATENCIA CADA 5 SEGUNDOS)
             fps_frame_count += 1
